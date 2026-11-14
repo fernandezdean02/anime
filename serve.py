@@ -670,32 +670,67 @@ async def proxy_seg(request: Request, url: str,
 
 # ═══════════════ VLC launcher ═══════════════
 def _launch_vlc(url: str, mime: str) -> "tuple[bool, str]":
-    """Launch an Android app for a URL. Detects dead am-socket and gives
-    an actionable error instead of a cryptic one."""
-    am = shutil.which("termux-am") or shutil.which("am")
-    if not am:
-        return False, "termux-am / am not found — pkg install termux-am"
-    last_err = ""
-    for extra in (["-p", "org.videolan.vlc"], []):
-        try:
-            r = subprocess.run(
-                [am, "start", "-a", "android.intent.action.VIEW",
-                 "-d", url, "-t", mime] + extra,
-                capture_output=True, timeout=8,
-            )
-            if r.returncode == 0 and not (r.stderr or b"").strip():
-                return True, ""
-            last_err = (r.stderr or r.stdout or b"").decode("utf-8", "replace").strip()
-        except Exception as e:
-            last_err = str(e)
-    if "Could not connect to socket" in last_err or "No such file" in last_err:
-        return False, (
-            "Termux am socket server is disabled in this build. "
-            "Fix: install Termux from GitHub (see backup/migrate steps), "
-            "OR use 'Copy link' in the player and paste in VLC → New stream."
-        )
-    return False, last_err or "launch failed"
+    """Try multiple Android intent launch strategies.
+    Returns (success, error_message)."""
+    attempts = []
+    errors = []
 
+    # 1. termux-am / am (uses Termux socket server)
+    for am_name in ("termux-am", "am"):
+        am_path = shutil.which(am_name)
+        if am_path:
+            for extra in (["-p", "org.videolan.vlc"], []):
+                attempts.append((am_name, [
+                    am_path, "start",
+                    "-a", "android.intent.action.VIEW",
+                    "-d", url, "-t", mime
+                ] + extra))
+            break
+
+    # 2. /system/bin/am direct (bypasses Termux socket — works on some Android versions)
+    for sys_am in ("/system/bin/am", "/system/bin/cmd"):
+        if os.path.exists(sys_am):
+            attempts.append((sys_am, [
+                sys_am, "start",
+                "-a", "android.intent.action.VIEW",
+                "-d", url, "-t", mime
+            ]))
+
+    # 3. termux-open (different wrapper, same socket under the hood)
+    to_path = shutil.which("termux-open")
+    if to_path:
+        attempts.append(("termux-open", [to_path, "--content-type", mime, url]))
+
+    # 4. termux-open-url (last resort)
+    tou_path = shutil.which("termux-open-url")
+    if tou_path:
+        attempts.append(("termux-open-url", [tou_path, url]))
+
+    for name, cmd in attempts:
+        try:
+            r = subprocess.run(cmd, capture_output=True, timeout=8)
+            stderr = (r.stderr or b"").decode("utf-8", "replace").strip()
+            stdout = (r.stdout or b"").decode("utf-8", "replace").strip()
+            if r.returncode == 0 and not (stderr and "socket" in stderr.lower()):
+                log.info(f"[vlc-launch] {name} succeeded")
+                return True, ""
+            errors.append(f"{name}: rc={r.returncode} {stderr or stdout or '(no output)'}"[:200])
+        except subprocess.TimeoutExpired:
+            errors.append(f"{name}: timeout")
+        except Exception as e:
+            errors.append(f"{name}: {str(e)[:100]}")
+
+    full_err = " | ".join(errors) if errors else "no launch methods available"
+    log.warning(f"[vlc-launch] all failed: {full_err}")
+
+    if "socket" in full_err.lower() or "No such file" in full_err:
+        return False, (
+            "Cannot launch VLC from this Termux build: the am socket server is disabled "
+            "(common on F-Droid Termux). The URL has been copied to your clipboard — "
+            "open VLC → Menu → New stream → paste. "
+            "To fix the button permanently, install Termux from GitHub releases."
+        )
+    return False, full_err
 
 @app.get("/open")
 async def open_vlc(request: Request, url: str,
