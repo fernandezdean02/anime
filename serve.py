@@ -61,6 +61,28 @@ def get_http() -> httpx.AsyncClient:
     return _shared_client
 
 
+_stream_client: httpx.AsyncClient | None = None
+
+
+def get_stream_http() -> httpx.AsyncClient:
+    """Dedicated client for media segment streaming.
+    HTTP/1.1 (no multiplexing bugs with long streams), very long read
+    timeout, generous keepalive so segments survive buffer pauses."""
+    global _stream_client
+    if _stream_client is None or _stream_client.is_closed:
+        _stream_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=15.0, read=120.0, write=30.0, pool=15.0),
+            follow_redirects=True,
+            http2=False,
+            limits=httpx.Limits(
+                max_connections=50,
+                max_keepalive_connections=30,
+                keepalive_expiry=120.0,
+            ),
+        )
+    return _stream_client
+
+
 _cffi_session: "CffiAsyncSession | None" = None
 _cffi_lock = asyncio.Lock()
 
@@ -165,16 +187,21 @@ _last_reset = [time.time()]
 
 @app.middleware("http")
 async def reset_http_periodically(request: Request, call_next):
-    global _shared_client, _cffi_session, _last_reset
+    global _shared_client, _stream_client, _cffi_session, _last_reset
     if time.time() - _last_reset[0] > 1800:
         old_http = _shared_client
+        old_stream = _stream_client
         old_cffi = _cffi_session
         _shared_client = None
+        _stream_client = None
         _cffi_session = None
         _last_reset[0] = time.time()
         log.info("[http-client] reset after 30 min")
         if old_http:
             try: asyncio.create_task(old_http.aclose())
+            except: pass
+        if old_stream:
+            try: asyncio.create_task(old_stream.aclose())
             except: pass
         if old_cffi:
             try: asyncio.create_task(old_cffi.close())
@@ -296,8 +323,10 @@ def _is_mp4_url(u: str) -> bool:
 
 
 def _is_media_segment(u: str) -> bool:
-    path = u.split("?", 1)[0].lower()
-    return any(path.endswith(ext) for ext in (".ts", ".m4s", ".m4f", ".m4v", ".mp4", ".aac", ".webm"))
+    # Anything routed through /p/seg that isn't a manifest or subtitle
+    # is a media segment — including query-string URLs with no extension,
+    # .key files, .m4a audio, .fmp4 fragmented mp4, etc.
+    return not _is_m3u8_url(u) and not _is_ass_url(u)
 
 
 def _looks_like_mp4(data: bytes) -> bool:
@@ -533,47 +562,53 @@ async def proxy_seg(request: Request, url: str, referer: "str | None" = None,
     range_hdr = request.headers.get("range")
     is_mp4 = _is_mp4_url(url)
 
-    if _is_media_segment(url) or is_mp4:
-        try:
-            fh = {"User-Agent": UA, "Accept": "*/*"}
-            if referer:
-                fh["Referer"] = referer
-                fh["Origin"] = _origin(referer)
-            if range_hdr:
-                fh["Range"] = range_hdr
+    # ═══════════ PRIMARY: stream via dedicated client ═══════════
+    # Tried first for ALL segments (and mp4). Trusts any 2xx/3xx from CDN.
+    # Uses a client with 120s read timeout + HTTP/1.1 so long segments
+    # don't die mid-download. Cffi is only a fallback for CF challenges.
+    try:
+        fh = {"User-Agent": UA, "Accept": "*/*"}
+        if referer:
+            fh["Referer"] = referer
+            fh["Origin"] = _origin(referer)
+        if range_hdr:
+            fh["Range"] = range_hdr
 
-            client = get_http()
-            req = client.build_request("GET", url, headers=fh)
-            upstream = await client.send(req, stream=True)
-            ct = (upstream.headers.get("content-type") or "").lower()
-            st = upstream.status_code
+        client = get_stream_http()
+        req = client.build_request("GET", url, headers=fh)
+        upstream = await client.send(req, stream=True)
+        st = upstream.status_code
+        ct = (upstream.headers.get("content-type") or "").lower()
 
-            playable = st < 400 and (
-                "video" in ct or "audio" in ct or "octet-stream" in ct
-                or "mp2t" in ct or "mpeg" in ct or "mp4" in ct
-            )
+        if st < 400:
+            out_headers = {"Accept-Ranges": "bytes"}
+            for h in ("content-type", "content-length", "content-range", "cache-control"):
+                v = upstream.headers.get(h)
+                if v: out_headers[h.title()] = v
+            if not any(k.lower() == "content-type" for k in out_headers):
+                out_headers["Content-Type"] = "video/mp4" if is_mp4 else "video/mp2t"
 
-            if playable:
-                out_headers = {}
-                for h in ("content-type", "content-length", "content-range",
-                          "accept-ranges", "cache-control"):
-                    v = upstream.headers.get(h)
-                    if v: out_headers[h.title()] = v
+            async def seg_body():
+                try:
+                    async for chunk in upstream.aiter_raw(chunk_size=131072):
+                        yield chunk
+                except Exception as e:
+                    log.info(f"[seg] stream err: {e}")
+                finally:
+                    try: await upstream.aclose()
+                    except Exception: pass
 
-                async def fast_body():
-                    try:
-                        async for chunk in upstream.aiter_raw(chunk_size=65536):
-                            yield chunk
-                    finally:
-                        await upstream.aclose()
+            return StreamingResponse(seg_body(), status_code=st, headers=out_headers)
 
-                return StreamingResponse(fast_body(), status_code=st, headers=out_headers)
+        # 4xx/5xx — likely CF challenge or origin error. Try cffi.
+        try: await upstream.aclose()
+        except Exception: pass
+        log.info(f"/p/seg primary failed: {st} ct={ct[:40]} — trying cffi")
 
-            await upstream.aclose()
-            log.info(f"/p/seg fast failed (status={st}, ct={ct[:40]}), trying cffi")
-        except Exception as e:
-            log.info(f"/p/seg fast exception: {e}, trying cffi")
+    except Exception as e:
+        log.info(f"/p/seg primary exception: {e} — trying cffi")
 
+    # ═══════════ FALLBACK: cffi (only for CF challenges) ═══════════
     if HAS_CFFI:
         body, ct, status, label, hdrs = await _fetch_media_cffi(url, referer, range_hdr, overall_timeout=15.0)
         if body is not None:
@@ -587,8 +622,9 @@ async def proxy_seg(request: Request, url: str, referer: "str | None" = None,
             return Response(content=body, status_code=status,
                             media_type=ct or "application/octet-stream",
                             headers=out_hdrs)
-        log.warning(f"/p/seg cffi failed ({label}), trying httpx")
+        log.warning(f"/p/seg cffi failed ({label})")
 
+    # ═══════════ LAST RESORT: buffered httpx fallback ═══════════
     fwd_headers = {"User-Agent": UA, "Accept": "*/*"}
     if referer:
         fwd_headers["Referer"] = referer
@@ -617,41 +653,14 @@ async def proxy_seg(request: Request, url: str, referer: "str | None" = None,
         log.warning(f"HTML returned for media: {url[:100]}")
         return Response(content=b"upstream returned HTML", status_code=502, media_type="text/plain")
 
-    if is_mp4 and not range_hdr:
-        head_chunks = []
-        head_total = 0
-        async for chunk in upstream.aiter_raw(chunk_size=8192):
-            head_chunks.append(chunk)
-            head_total += len(chunk)
-            if head_total >= 16384: break
-        head = b"".join(head_chunks)
-        if not _looks_like_mp4(head):
-            await upstream.aclose()
-            return Response(content=b"upstream returned non-MP4", status_code=502, media_type="text/plain")
-
-        out_headers = {}
-        for h in ("content-type", "content-length", "content-range", "accept-ranges", "cache-control"):
-            v = upstream.headers.get(h)
-            if v: out_headers[h.title()] = v
-
-        async def mp4_body():
-            try:
-                yield head
-                async for chunk in upstream.aiter_raw(chunk_size=65536):
-                    yield chunk
-            finally:
-                await upstream.aclose()
-
-        return StreamingResponse(mp4_body(), status_code=upstream.status_code, headers=out_headers)
-
-    out_headers = {}
-    for h in ("content-type", "content-length", "content-range", "accept-ranges", "cache-control"):
+    out_headers = {"Accept-Ranges": "bytes"}
+    for h in ("content-type", "content-length", "content-range", "cache-control"):
         v = upstream.headers.get(h)
         if v: out_headers[h.title()] = v
 
     async def body():
         try:
-            async for chunk in upstream.aiter_raw(chunk_size=65536):
+            async for chunk in upstream.aiter_raw(chunk_size=131072):
                 yield chunk
         finally:
             await upstream.aclose()
@@ -772,6 +781,7 @@ async def health():
         "base_dir": BASE_DIR, "static_dir": STATIC_DIR,
         "static_exists": os.path.isdir(STATIC_DIR),
         "fast_segments": True,
+        "stream_client": _stream_client is not None and not _stream_client.is_closed,
     }
 
 
