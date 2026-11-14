@@ -5,23 +5,24 @@ import time
 from src.providers._media import build_ctx
 
 RANKING = [
-    "anineko", "anizone", "anikoto", "reanime", "aniwaves",
+    "anineko", "anizone", "anikoto", "aniwaves",
     "kaa", "anibd", "animegg", "mkissa", "animeonsen",
+    # "reanime",  # disabled — returns non-m3u8 payloads, poisons the race
 ]
 
 # ─── Timeout strategy ──────────────────────────────────────────────────
 # Since all providers race in parallel, worst-case total = max(timeout).
 # Good providers return in <10s; slower ones get more but capped.
-WATCH_TIMEOUT        = 22.0   # was 75.0 — huge win, worst case now 22s not 75s
+WATCH_TIMEOUT        = 22.0   # per-provider watch cap
 FAST_PROVIDER_TIMEOUT = 8.0   # proven-fast providers fail fast on regression
-DRAIN_AFTER_WIN      = 1.0    # was 8.0 — just enough to record latency, not hunt for winner
-EPISODES_TIMEOUT     = 30.0   # was 60.0 — merged_episodes waits for slowest
-WATCH_CACHE_TTL      = 300.0  # was 45.0 — 5 min makes ep-switching back/forth instant
+DRAIN_AFTER_WIN      = 1.0    # brief wait after winner to log other timings
+EPISODES_TIMEOUT     = 30.0   # per-provider episodes cap
+WATCH_CACHE_TTL      = 300.0  # 5 min in-process watch cache
 
 _latency: dict = {}
 _ep_latency: dict = {}
 _failures: dict = {}
-_last_win: dict = {}    # anilistId -> (provider_name, timestamp)
+_last_win: dict = {}
 _watch_cache: dict = {}
 
 
@@ -100,14 +101,15 @@ async def _watch_one(mod, name, anilist_id, ep, audio, ctx, timeout):
 
 async def race_watch(anilist_id: int, ep: int, audio: str = "sub",
                      preferred: str | None = None) -> dict | None:
+    """Race all providers in parallel. Preferred/last-winner get a microsecond
+    head start (not a blocking wait) so a slow preferred doesn't stall the
+    race. First non-empty stream set wins; other tasks are drained briefly
+    then cancelled."""
     mods = providers()
     if not mods:
         return None
     ctx = await build_ctx(anilist_id)
 
-    # Priority ordering only affects which task starts first (microseconds
-    # matter for cancellation order, not for who wins). The real speedup
-    # comes from racing EVERYONE simultaneously, not sequencing.
     last_win = _last_win.get(anilist_id, (None, 0))[0]
     priority = []
     if preferred:
@@ -188,16 +190,43 @@ async def _episodes_one(mod, name, anilist_id, ctx):
 
 
 async def merged_episodes(anilist_id: int) -> dict | None:
+    """Race all providers for the episode list. Returns AS SOON AS the first
+    provider succeeds — the player only uses the first provider with episodes,
+    so waiting for the rest is pure wasted latency (10-25s on cold anime)."""
     mods = providers()
     if not mods:
         return None
     ctx = await build_ctx(anilist_id)
-    results = await asyncio.gather(
-        *[_episodes_one(mod, name, anilist_id, ctx) for name, mod in mods])
-    merged = {name: data for name, data in results if data}
-    if not merged:
-        return None
-    return {"anilistId": anilist_id, "source": "native", "providers": merged}
+
+    pending = {
+        asyncio.ensure_future(_episodes_one(mod, name, anilist_id, ctx))
+        for name, mod in mods
+    }
+    merged: dict = {}
+    try:
+        while pending:
+            done, pending = await asyncio.wait(
+                pending, return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in done:
+                try:
+                    name, data = task.result()
+                except Exception:
+                    continue
+                if data:
+                    merged[name] = data
+                    # First success — return immediately, cancel the rest
+                    return {"anilistId": anilist_id, "source": "native",
+                            "providers": merged}
+    finally:
+        for task in pending:
+            task.cancel()
+        for task in pending:
+            try:
+                await task
+            except BaseException:
+                pass
+    return None
 
 
 def merge_subtitles(streams: list) -> list:
