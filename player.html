@@ -1,818 +1,1509 @@
-"""Serve the anime API + local UI + stream proxy + VLC launcher.
-Uses curl_cffi (browser TLS impersonation) for CDN bypass when available,
-falls back to httpx when cffi fails (e.g. non-Cloudflare CDNs).
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Player</title>
+  <link rel="stylesheet" href="./styles.css">
+  <script src="./hls.min.js"></script>
+</head>
+<body>
+  <header>
+    <a class="back" href="./index.html">← Back</a>
+    <span class="brand" id="header-title">Player</span>
+  </header>
 
-Run:  python serve.py
+  <div class="player-wrap">
+    <div class="player-main">
+      <div class="video-box">
+        <video id="video" controls playsinline webkit-playsinline preload="metadata"></video>
+        <div class="overlay" id="overlay">Loading…</div>
+      </div>
+      <div class="meta">
+        <div class="cover-wrap">
+          <img id="cover" alt="" loading="lazy">
+        </div>
+        <div class="meta-text">
+          <h2 id="title">Loading…</h2>
+          <p id="subtitle"></p>
+          <div class="meta-pills">
+            <span class="status-pill" id="status-pill">
+              <span class="dot"></span><span id="status-text">Idle</span>
+            </span>
+            <span class="meta-badge" id="meta-provider" hidden></span>
+            <span class="meta-badge" id="meta-quality" hidden></span>
+          </div>
+        </div>
+      </div>
+    </div>
 
-Env overrides:
-  EXTRACT_TIMEOUT    default 50   (was 100 — caused the 100s hangs)
-  EPISODES_TIMEOUT   default 90
-  INFO_TIMEOUT       default 20
-  FORCE_HTTPX_MP4    set to 1 to skip cffi buffering for .mp4 (avoids RAM)
-"""
-import os
-import re
-import json
-import time
-import hashlib
-import asyncio
-import logging
-import shutil
-import subprocess
-from urllib.parse import urljoin, quote
+    <aside class="side">
+      <div class="card">
+        <h3>Audio <span class="badge" id="audio-count">—</span></h3>
+        <select id="audio-select" class="track-select" disabled>
+          <option>Loading…</option>
+        </select>
+      </div>
 
-import httpx
-from fastapi import Request
-from fastapi.responses import Response, StreamingResponse, RedirectResponse
-from fastapi.staticfiles import StaticFiles
-from fastapi.middleware.cors import CORSMiddleware
+      <div class="card" id="cc-section">
+        <h3>Captions <span class="badge" id="caption-count">—</span></h3>
+        <select id="caption-select" class="track-select">
+          <option value="-1">Off</option>
+        </select>
+      </div>
 
-from api import app
+      <div class="card">
+        <h3>Server</h3>
+        <select id="provider-select" class="track-select"></select>
+      </div>
 
-# ═══════════════ curl_cffi (browser TLS impersonation) ═══════════════
-try:
-    from curl_cffi.requests import AsyncSession as CffiAsyncSession
-    HAS_CFFI = True
-except ImportError:
-    HAS_CFFI = False
-    CffiAsyncSession = None
+      <div class="card" id="vlc-section">
+        <h3>External Player</h3>
+        <input type="url" id="vlc-url-input" class="vlc-url-input"
+               placeholder="Stream URL (auto-fills or paste manually)" autocomplete="off" spellcheck="false">
+        <div class="vlc-mode" id="vlc-mode">
+          <label><input type="radio" name="vlc-mode" value="raw" checked> <span>Raw CDN</span></label>
+          <label><input type="radio" name="vlc-mode" value="proxy"> <span>Proxied</span></label>
+        </div>
+        <div class="vlc-row">
+          <button id="vlc-copy" class="btn-ghost">Copy link</button>
+          <button id="vlc-open" class="btn-accent">▶ Open in VLC</button>
+        </div>
+        <div id="vlc-hint" class="hint" style="margin-top:8px">No stream yet</div>
+      </div>
 
-log = logging.getLogger("uvicorn.error")
+      <div class="card episodes-card">
+        <h3>Episodes <span id="ep-source" class="ep-source"></span></h3>
+        <div class="ep-list" id="ep-list"><span class="hint">Loading…</span></div>
+      </div>
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+      <button class="retry" id="retry">Retry extraction</button>
+    </aside>
+  </div>
 
+  <button id="log-toggle" title="Dev log">📋</button>
+  <div id="log-panel">
+    <div id="log-header">
+      <strong>Dev Log</strong>
+      <span id="log-count" style="opacity:.6;font-size:11px"></span>
+      <span style="flex:1"></span>
+      <button id="log-copy">Copy</button>
+      <button id="log-clear">Clear</button>
+      <button id="log-close">✕</button>
+    </div>
+    <pre id="log-content"></pre>
+  </div>
 
-# ═══════════════ shared httpx client (fallback) ═══════════════
-_shared_client: httpx.AsyncClient | None = None
-
-def get_http() -> httpx.AsyncClient:
-    global _shared_client
-    if _shared_client is None or _shared_client.is_closed:
-        _shared_client = httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=8.0, read=30.0, write=10.0, pool=5.0),
-            follow_redirects=True,
-            http2=True,
-            limits=httpx.Limits(
-                max_connections=100,
-                max_keepalive_connections=20,
-                keepalive_expiry=15.0,
-            ),
-        )
-    return _shared_client
-
-
-# ═══════════════ curl_cffi session ═══════════════
-_cffi_session: "CffiAsyncSession | None" = None
-_cffi_lock = asyncio.Lock()
-
-async def get_cffi():
-    global _cffi_session
-    if not HAS_CFFI:
-        return None
-    if _cffi_session is None:
-        async with _cffi_lock:
-            if _cffi_session is None:
-                _cffi_session = CffiAsyncSession(max_clients=20)
-    return _cffi_session
-
-
-# ═══════════════ per-endpoint hard timeouts ═══════════════
-TIMEOUTS = {
-    "/anime/extract":  float(os.environ.get("EXTRACT_TIMEOUT",  "50")),
-    "/anime/episodes": float(os.environ.get("EPISODES_TIMEOUT", "90")),
-    "/anime/info":     float(os.environ.get("INFO_TIMEOUT",     "20")),
+<style>
+/* ═══════ PREMIUM THEME ═══════ */
+:root {
+  --glow: rgba(124, 92, 255, 0.35);
+  --glass: rgba(24, 24, 34, 0.72);
+  --glass-border: rgba(255, 255, 255, 0.06);
 }
 
-def _timeout_for(path: str) -> "float | None":
-    for prefix, t in TIMEOUTS.items():
-        if path.startswith(prefix):
-            return t
-    return None
+body {
+  background:
+    radial-gradient(1200px 600px at 15% -10%, #1a1430 0%, transparent 55%),
+    radial-gradient(900px 500px at 100% 100%, #0d1a2e 0%, transparent 55%),
+    var(--bg, #0a0a0f);
+  background-attachment: fixed;
+}
 
+.player-wrap {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: 20px;
+  max-width: 1600px;
+  margin: 0 auto;
+  padding: 20px;
+}
+@media (max-width: 900px) {
+  .player-wrap { grid-template-columns: 1fr; padding: 12px; }
+  .side { max-height: none; }
+}
 
-# ═══════════════ persistent disk cache ═══════════════
-CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache")
-os.makedirs(CACHE_DIR, exist_ok=True)
+/* Video box */
+.video-box {
+  position: relative;
+  border-radius: 16px;
+  overflow: hidden;
+  box-shadow:
+    0 24px 60px rgba(0, 0, 0, 0.55),
+    0 0 100px rgba(124, 92, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  background: #000;
+  aspect-ratio: 16 / 9;
+}
+.video-box video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: #000;
+  object-fit: contain;
+}
 
-CACHE_TTL = [
-    ("/anime/extract",  300),
-    ("/anime/episodes", 7200),
-    ("/anime/info",     86400),
-    ("/anime/",         600),
-]
-MAX_CACHE_BODY = 8_000_000
-NEGATIVE_TTL = 60          # empty extract re-tries sooner
-MIN_CACHE_BODY = 4
+/* Meta strip */
+.meta {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  padding: 16px;
+  margin-top: 12px;
+  border-radius: 14px;
+  background: var(--glass);
+  backdrop-filter: blur(16px);
+  border: 1px solid var(--glass-border);
+}
 
-def _ttl_for(path: str) -> int:
-    for prefix, ttl in CACHE_TTL:
-        if path.startswith(prefix):
-            return ttl
-    return 600
+.cover-wrap {
+  width: 66px;
+  height: 94px;
+  border-radius: 10px;
+  overflow: hidden;
+  flex-shrink: 0;
+  background: linear-gradient(135deg, #1a1a26 0%, #252532 100%);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4), inset 0 0 0 1px rgba(255,255,255,0.04);
+}
+.cover-wrap img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  transition: opacity 0.3s ease;
+}
+.cover-wrap img.loading { opacity: 0; }
+.cover-wrap img.placeholder { opacity: 0.35; }
 
-def _ttl_for_body(path: str, body: bytes) -> int:
-    """Shorter TTL for empty extracts / races so they retry upstream."""
-    base = _ttl_for(path)
-    if "/extract" in path or "/race" in path:
-        try:
-            data = json.loads(body)
-            if isinstance(data, dict) and not data.get("streams"):
-                return NEGATIVE_TTL
-        except Exception:
-            pass
-    return base
+.meta-text { min-width: 0; flex: 1; }
+.meta-text h2 {
+  font-size: 18px;
+  margin: 0 0 5px;
+  line-height: 1.25;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.meta-text p { font-size: 12px; color: var(--muted); margin: 0 0 10px; }
+.meta-pills { display: flex; gap: 6px; flex-wrap: wrap; }
+.meta-badge {
+  padding: 3px 9px;
+  font-size: 10px;
+  font-weight: 700;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--muted);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
 
-def _cache_path(key: str) -> str:
-    return os.path.join(CACHE_DIR, hashlib.md5(key.encode()).hexdigest() + ".json")
+/* Status pill */
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--muted);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+.status-pill .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.status-pill.playing { color: #10b981; background: rgba(16, 185, 129, 0.1); border-color: rgba(16, 185, 129, 0.25); }
+.status-pill.playing .dot { animation: pulse 1.8s ease-in-out infinite; box-shadow: 0 0 8px #10b981; }
+.status-pill.loading { color: #f59e0b; background: rgba(245, 158, 11, 0.1); border-color: rgba(245, 158, 11, 0.25); }
+.status-pill.error { color: #ef4444; background: rgba(239, 68, 68, 0.1); border-color: rgba(239, 68, 68, 0.25); }
+@keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
 
-def _cache_get(key: str):
-    p = _cache_path(key)
-    if not os.path.exists(p):
-        return None
-    try:
-        with open(p, "r", encoding="utf-8") as f:
-            rec = json.load(f)
-        if rec.get("exp", 0) < time.time():
-            try: os.remove(p)
-            except: pass
-            return None
-        return rec
-    except Exception:
-        return None
+/* Sidebar */
+.side {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: calc(100vh - 100px);
+  overflow-y: auto;
+  padding-right: 4px;
+  scrollbar-width: thin;
+}
+.side::-webkit-scrollbar { width: 6px; }
+.side::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 3px; }
 
-def _cache_set(key, body, ct, status, ttl):
-    if len(body) > MAX_CACHE_BODY or len(body) < MIN_CACHE_BODY:
-        return
-    try:
-        rec = {"exp": time.time() + ttl, "ct": ct, "st": status,
-               "body": body.decode("utf-8", errors="replace")}
-        tmp = _cache_path(key) + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(rec, f)
-        os.replace(tmp, _cache_path(key))
-    except Exception as e:
-        log.warning(f"cache write failed: {e}")
+.card {
+  background: var(--glass);
+  backdrop-filter: blur(16px);
+  border: 1px solid var(--glass-border);
+  border-radius: 14px;
+  padding: 14px 16px;
+  transition: border-color 0.2s;
+}
+.card:hover { border-color: rgba(124, 92, 255, 0.2); }
 
+.card h3 {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin: 0 0 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.card h3 .badge {
+  font-size: 10px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: rgba(124, 92, 255, 0.15);
+  color: var(--accent, #7c5cff);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  min-width: 18px;
+  text-align: center;
+}
+.card h3 .badge.empty {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--muted);
+}
 
-# ═══════════════ periodic client reset ═══════════════
-_last_reset = [time.time()]
+/* Dropdown selects — matches server list, dark bg */
+.track-select {
+  width: 100%;
+  padding: 10px 12px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  outline: none;
+  transition: border-color 0.15s, background 0.15s;
+  -webkit-appearance: none;
+  appearance: none;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23a0a0b0' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  padding-right: 32px;
+}
+.track-select:hover:not(:disabled) { background-color: rgba(0, 0, 0, 0.45); }
+.track-select:focus { border-color: var(--accent, #7c5cff); box-shadow: 0 0 0 3px rgba(124, 92, 255, 0.12); }
+.track-select:disabled { opacity: 0.6; cursor: not-allowed; }
+.track-select option { background: #14141c; color: var(--text); }
 
-@app.middleware("http")
-async def reset_http_periodically(request: Request, call_next):
-    global _shared_client, _cffi_session, _last_reset
-    if time.time() - _last_reset[0] > 1800:
-        old_http = _shared_client
-        old_cffi = _cffi_session
-        _shared_client = None
-        _cffi_session = None
-        _last_reset[0] = time.time()
-        log.info("[http-client] reset after 30 min")
-        if old_http:
-            try: asyncio.create_task(old_http.aclose())
-            except: pass
-        if old_cffi:
-            try: asyncio.create_task(old_cffi.close())
-            except: pass
-    return await call_next(request)
+/* VLC section */
+.vlc-url-input {
+  width: 100%;
+  padding: 9px 11px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 9px;
+  color: var(--text);
+  font-size: 11px;
+  font-family: ui-monospace, Monaco, Consolas, monospace;
+  margin-bottom: 10px;
+  outline: none;
+  box-sizing: border-box;
+}
+.vlc-url-input:focus { border-color: var(--accent, #7c5cff); box-shadow: 0 0 0 3px rgba(124, 92, 255, 0.12); }
+.vlc-url-input::placeholder { color: var(--muted); }
 
+.vlc-mode { display: flex; gap: 6px; margin-bottom: 10px; background: rgba(0, 0, 0, 0.25); border-radius: 8px; padding: 3px; }
+.vlc-mode label {
+  flex: 1;
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.vlc-mode label:has(input:checked) { background: rgba(124, 92, 255, 0.15); color: var(--accent2, #a78bfa); }
+.vlc-mode input { display: none; }
 
-# ═══════════════ middleware: timeout + cache + tagged log ═══════════════
-@app.middleware("http")
-async def cache_and_log(request: Request, call_next):
-    path = request.url.path
-    is_api = path.startswith("/anime/")
-    t0 = time.time()
+.vlc-row { display: flex; gap: 8px; }
+.btn-ghost, .btn-accent {
+  flex: 1;
+  padding: 10px 12px;
+  border-radius: 9px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  transition: all 0.15s;
+}
+.btn-ghost { background: rgba(255, 255, 255, 0.04); color: var(--text); }
+.btn-ghost:hover:not(:disabled) { background: rgba(255, 255, 255, 0.08); }
+.btn-accent {
+  background: linear-gradient(135deg, var(--accent, #7c5cff), var(--accent2, #a78bfa));
+  color: white;
+  border-color: transparent;
+  box-shadow: 0 3px 10px var(--glow);
+}
+.btn-accent:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 5px 16px var(--glow); }
+.btn-ghost:disabled, .btn-accent:disabled { opacity: 0.5; cursor: not-allowed; }
 
-    qp = dict(request.query_params)
-    tag = ""
-    if "provider" in qp:
-        tag += f" [provider={qp['provider']}]"
-    if "deep" in qp:
-        tag += " [deep]"
-    if "direct" in qp:
-        tag += " [direct]"
+/* Episodes */
+.episodes-card { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.ep-source { font-size: 9px; color: var(--muted); text-transform: none; font-weight: 500; letter-spacing: 0; }
+.ep-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(38px, 1fr));
+  gap: 5px;
+  overflow-y: auto;
+  max-height: 260px;
+  padding-right: 2px;
+}
+.ep-list button {
+  padding: 8px 4px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  color: var(--text);
+  border-radius: 7px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.12s;
+}
+.ep-list button:hover { background: rgba(124, 92, 255, 0.08); border-color: rgba(124, 92, 255, 0.25); }
+.ep-list button.active {
+  background: linear-gradient(135deg, var(--accent, #7c5cff), var(--accent2, #a78bfa));
+  color: white;
+  border-color: transparent;
+  box-shadow: 0 2px 8px var(--glow);
+}
 
-    if not is_api:
-        resp = await call_next(request)
-        if path.startswith("/p/"):
-            log.info(f"{(time.time()-t0)*1000:7.0f}ms  {resp.status_code}  {path}{tag}")
-        return resp
+/* Retry */
+.retry {
+  width: 100%;
+  padding: 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--text);
+  border-radius: 11px;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.retry:hover { background: rgba(124, 92, 255, 0.08); border-color: rgba(124, 92, 255, 0.3); color: var(--accent2, #a78bfa); }
 
-    bypass = "nocache=1" in request.url.query
-    timeout = None if "deep" in qp else _timeout_for(path)
+.hint { font-size: 11px; color: var(--muted); line-height: 1.5; }
 
-    if not bypass:
-        key = f"{path}?{request.url.query}"
-        hit = _cache_get(key)
-        if hit:
-            cached_prov = ""
-            try:
-                data = json.loads(hit["body"])
-                if isinstance(data, dict):
-                    if data.get("provider"):
-                        cached_prov = f" [cached from {data['provider']}]"
-                    elif isinstance(data.get("streams"), list):
-                        ps = [s.get("provider") for s in data["streams"]
-                              if isinstance(s, dict) and s.get("provider")]
-                        if ps:
-                            cached_prov = f" [cached from {','.join(ps[:3])}]"
-            except Exception:
-                pass
-            log.info(f"{0:7.0f}ms  {hit['st']}  {path}{tag}{cached_prov}  [CACHE HIT]")
-            return Response(content=hit["body"].encode("utf-8"),
-                            status_code=hit["st"], media_type=hit["ct"],
-                            headers={"X-Cache": "HIT"})
+/* Overlay */
+.overlay {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  backdrop-filter: blur(12px);
+  background: rgba(10, 10, 15, 0.75);
+  font-size: 14px;
+  font-weight: 500;
+  padding: 24px;
+  text-align: center;
+}
+.overlay.hidden { display: none !important; }
+.overlay button { pointer-events: auto !important; cursor: pointer; }
 
-    try:
-        if timeout:
-            resp = await asyncio.wait_for(call_next(request), timeout=timeout)
-        else:
-            resp = await call_next(request)
-    except asyncio.TimeoutError:
-        dt = (time.time() - t0) * 1000
-        log.warning(f"{dt:7.0f}ms  504  {path}{tag}  [TIMEOUT {timeout}s]")
-        return Response(
-            content=json.dumps({
-                "error": f"Upstream took longer than {timeout:.0f}s",
-                "timeout": True, "streams": [], "providers": {}, "results": [],
-            }).encode(),
-            status_code=504, media_type="application/json",
-        )
+/* Dev log */
+#log-toggle{position:fixed;bottom:16px;right:16px;z-index:9999;width:48px;height:48px;border-radius:50%;background:linear-gradient(135deg,var(--accent,#7c5cff),var(--accent2,#a78bfa));color:#fff;border:0;font-size:20px;cursor:pointer;box-shadow:0 4px 16px var(--glow)}
+#log-toggle:hover{transform:translateY(-1px);box-shadow:0 6px 20px var(--glow)}
+#log-panel{display:none;position:fixed;bottom:76px;right:16px;z-index:9999;width:min(560px,calc(100vw - 32px));max-height:60vh;background:rgba(13,13,18,0.95);backdrop-filter:blur(20px);border:1px solid var(--glass-border);border-radius:14px;flex-direction:column;box-shadow:0 8px 32px rgba(0,0,0,.6)}
+#log-panel.open{display:flex}
+#log-header{display:flex;gap:6px;align-items:center;padding:12px 14px;border-bottom:1px solid var(--glass-border);font-size:13px}
+#log-header button{padding:4px 10px;background:rgba(255,255,255,0.06);color:var(--text);border:1px solid var(--glass-border);border-radius:6px;cursor:pointer;font-size:12px}
+#log-header button:hover{border-color:var(--accent,#7c5cff)}
+#log-content{flex:1;overflow:auto;padding:10px 14px;font:11px/1.5 ui-monospace,Monaco,Consolas,monospace;color:#c8c8d0;white-space:pre-wrap;word-break:break-all;margin:0;max-height:calc(60vh - 48px)}
 
-    dt = (time.time() - t0) * 1000
+@keyframes spin { to { transform: rotate(360deg); } }
+.spinner {
+  width: 32px;
+  height: 32px;
+  border: 3px solid rgba(255, 255, 255, 0.1);
+  border-top-color: var(--accent, #7c5cff);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+</style>
 
-    if resp.status_code == 200 and not bypass:
-        try:
-            body = getattr(resp, "body", b"") or b""
-            if not body and hasattr(resp, "body_iterator"):
-                chunks = []
-                async for chunk in resp.body_iterator:
-                    chunks.append(chunk)
-                body = b"".join(chunks)
-            if body:
-                # Normalize null streams so the player never sees `null.streams`
-                if "/extract" in path or "/race" in path:
-                    try:
-                        data = json.loads(body)
-                        if isinstance(data, dict) and not isinstance(data.get("streams"), list):
-                            data["streams"] = data.get("streams") or []
-                            body = json.dumps(data).encode()
-                            log.info(f"normalized null streams for {path}")
-                    except json.JSONDecodeError:
-                        pass
-                ttl = _ttl_for_body(path, body)
-                key = f"{path}?{request.url.query}"
-                _cache_set(key, body,
-                           resp.headers.get("content-type", "application/json"),
-                           resp.status_code, ttl)
-                tag_ttl = f"cached {ttl}s" if ttl != NEGATIVE_TTL else f"negative {ttl}s"
-                log.info(f"{dt:7.0f}ms  {resp.status_code}  {path}{tag}  [MISS → {tag_ttl}]")
-                return Response(content=body, status_code=resp.status_code,
-                                media_type=resp.headers.get("content-type"),
-                                headers={"X-Cache": "MISS"})
-        except Exception as e:
-            log.warning(f"cache write failed: {e}")
+<script>
+const $ = s => document.querySelector(s);
+const params = new URLSearchParams(location.search);
+const anilistId = Number(params.get('id'));
+const startEp   = Number(params.get('ep') || 1);
+const startType = params.get('type') === 'dub' ? 'dub' : 'sub';
+const STREAM_URL_OVERRIDE = params.get('streamUrl');
+const STREAM_REF_OVERRIDE = params.get('streamReferer') || '';
 
-    log.info(f"{dt:7.0f}ms  {resp.status_code}  {path}{tag}")
-    return resp
+const video    = $('#video');
+const overlay  = $('#overlay');
+const epList   = $('#ep-list');
+const epSource = $('#ep-source');
 
+// ---------------- DEV LOG ----------------
+const logLines = [];
+const MAX_LOG = 800;
+function fmt(v){
+  if (v instanceof Error) return v.message;
+  if (typeof v === 'string') return v;
+  try { return JSON.stringify(v); } catch { return String(v); }
+}
+function addLog(level, ...args){
+  const ts = new Date().toTimeString().slice(0, 8);
+  const line = `[${ts}] ${level.padEnd(5)} ${args.map(fmt).join(' ')}`;
+  logLines.push(line);
+  if (logLines.length > MAX_LOG) logLines.shift();
+  const el = document.getElementById('log-content');
+  if (el){ el.textContent = logLines.join('\n'); el.scrollTop = el.scrollHeight; }
+  const cnt = document.getElementById('log-count');
+  if (cnt) cnt.textContent = `(${logLines.length})`;
+}
+['log','info','warn','error','debug'].forEach(level => {
+  const orig = console[level].bind(console);
+  console[level] = (...a) => { orig(...a); addLog(level === 'log' ? 'INFO' : level.toUpperCase(), ...a); };
+});
+window.addEventListener('error', e => addLog('ERROR', 'uncaught:', e.message));
+window.addEventListener('unhandledrejection', e => addLog('ERROR', 'unhandled:', e.reason?.message || e.reason));
 
-# ═══════════════ stream proxy helpers ═══════════════
-UA = ("Mozilla/5.0 (Linux; Android 13; SM-G991B) "
-      "AppleWebKit/537.36 (KHTML, like Gecko) "
-      "Chrome/131.0.0.0 Mobile Safari/537.36")
+$('#log-toggle').addEventListener('click', () => $('#log-panel').classList.toggle('open'));
+$('#log-close').addEventListener('click', () => $('#log-panel').classList.remove('open'));
+$('#log-clear').addEventListener('click', () => {
+  logLines.length = 0;
+  document.getElementById('log-content').textContent = '';
+  document.getElementById('log-count').textContent = '(0)';
+  addLog('INFO', 'log cleared');
+});
+$('#log-copy').addEventListener('click', async () => {
+  const text = logLines.join('\n');
+  if (!text) return;
+  try {
+    if (navigator.clipboard) await navigator.clipboard.writeText(text);
+    else throw 0;
+    $('#log-copy').textContent = 'Copied!';
+  } catch {
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); } catch {}
+    ta.remove();
+    $('#log-copy').textContent = 'Copied!';
+  }
+  setTimeout(() => $('#log-copy').textContent = 'Copy', 1200);
+});
+// ---------------- END DEV LOG ----------------
 
-FORCE_HTTPX_MP4 = os.environ.get("FORCE_HTTPX_MP4", "0") == "1"
+// ---------------- PROVIDER SELECTION ----------------
+const ALL_PROVIDERS = ['kaa', 'anizone', 'aniwaves', 'anineko',
+                       'animeonsen', 'anikoto', 'mkissa', 'animegg'];
+const PROVIDER_LIST = [...new Set(ALL_PROVIDERS)];
+const DEFAULT_PROVIDER = 'anizone';
+const PROVIDER_STORAGE_KEY = 'provider-pref';
 
+let currentProvider = DEFAULT_PROVIDER;
+const urlProvider = params.get('provider');
+if (urlProvider){
+  currentProvider = urlProvider;
+  try { sessionStorage.setItem(PROVIDER_STORAGE_KEY, currentProvider); } catch {}
+} else {
+  try {
+    const saved = sessionStorage.getItem(PROVIDER_STORAGE_KEY);
+    if (saved) currentProvider = saved;
+  } catch {}
+}
 
-def _origin(referer: str) -> str:
-    p = referer.split("/", 3)
-    return f"{p[0]}//{p[2]}" if len(p) >= 3 else referer
+function populateProviderSelect(){
+  const sel = document.getElementById('provider-select');
+  if (!sel) return;
+  const list = PROVIDER_LIST.includes(currentProvider) ? PROVIDER_LIST : [currentProvider, ...PROVIDER_LIST];
+  sel.innerHTML = list.map(p => `<option value="${p}"${p === currentProvider ? ' selected' : ''}>${p}</option>`).join('');
+  sel.value = currentProvider;
+}
+populateProviderSelect();
 
+document.getElementById('provider-select').addEventListener('change', (e) => {
+  const newProvider = e.target.value;
+  if (newProvider === currentProvider) return;
+  currentProvider = newProvider;
+  try { sessionStorage.setItem(PROVIDER_STORAGE_KEY, currentProvider); } catch {}
+  clearExtractCache(anilistId, currentEp, currentType);
+  addLog('WARN', `server → ${currentProvider}`);
+  play(true, { deep: false });
+});
+// ---------------- END PROVIDER SELECTION ----------------
 
-def _is_m3u8_url(u: str) -> bool:
-    path = u.split("?", 1)[0].lower()
-    return path.endswith(".m3u8") or "m3u8" in path
+const PLACEHOLDER = "data:image/svg+xml;utf8," + encodeURIComponent(
+  `<svg xmlns='http://www.w3.org/2000/svg' width='200' height='300'>
+     <rect width='100%' height='100%' fill='#1e1e28'/>
+     <text x='50%' y='55%' fill='#6a6a80' font-family='sans-serif' font-size='12' text-anchor='middle'>No cover</text>
+   </svg>`);
 
+const EXTRACT_TIMEOUT_MS   = 105000;
+const FULL_RACE_TIMEOUT_MS = 105000;
+const DEEP_RACE_TIMEOUT_MS = 200000;
+const STARTUP_TIMEOUT_MS   = 45000;
 
-def _is_mp4_url(u: str) -> bool:
-    path = u.split("?", 1)[0].lower()
-    return path.endswith(".mp4") or path.endswith(".m4v")
+const EPS_TTL_MS     = 2 * 60 * 60 * 1000;
+const EXTRACT_TTL_MS = 5 * 60 * 1000;
+const STICKY_TTL_MS  = 6 * 60 * 60 * 1000;
 
+const epsKey     = id => `eps:${id}`;
+const extractKey = (id, ep, type) => `x:${id}:${ep}:${type}`;
+const stickyKey  = (id, ep, type) => `sticky:${id}:${ep}:${type}`;
 
-def _looks_like_mp4(data: bytes) -> bool:
-    if len(data) < 12: return False
-    return data[4:8] in (b'ftyp', b'moov', b'mdat', b'free',
-                         b'skip', b'wide', b'styp')
+let hls = null;
+let startupTimer = null;
+let episodes = null;
+let fakeEpisodes = null;
+let currentType = startType;
+let currentEp = startEp;
+let busy = false;
+let overlayTimer = null;
+let currentSubs = [];
+let currentSubsReferer = null;
+let currentStream = { url: '', referer: '', kind: 'hls', provider: '' };
+let currentCaptionTrack = -1;
 
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
 
-def _is_ass_url(u: str) -> bool:
-    path = u.split("?", 1)[0].lower()
-    return path.endswith(".ass") or path.endswith(".ssa")
+// ---------------- STATUS ----------------
+function setStatus(text, state = 'idle'){
+  const pill = document.getElementById('status-pill');
+  const txt = document.getElementById('status-text');
+  if (!pill || !txt) return;
+  pill.className = 'status-pill' + (state !== 'idle' ? ' ' + state : '');
+  txt.textContent = text;
+}
+function setMetaBadge(id, text){
+  const el = document.getElementById(id);
+  if (!el) return;
+  if (text){ el.textContent = text; el.hidden = false; } else { el.hidden = true; }
+}
+// ---------------- END STATUS ----------------
 
+// ---------------- TRACK CONTROLS ----------------
+function resetTrackControls(){
+  const audioSel = document.getElementById('audio-select');
+  const audioCount = document.getElementById('audio-count');
+  if (audioSel){
+    audioSel.innerHTML = '<option>Loading…</option>';
+    audioSel.disabled = true;
+  }
+  if (audioCount){ audioCount.textContent = '—'; audioCount.classList.add('empty'); }
 
-def _ass_to_vtt(ass_text: str) -> str:
-    raw = ass_text.replace("\r\n", "\n").replace("\r", "\n")
-    lines = raw.split("\n")
-    fields = ["Layer","Start","End","Style","Name","MarginL","MarginR","MarginV","Effect","Text"]
-    in_events = False
-    events: "list[str]" = []
-    for line in lines:
-        s = line.strip()
-        if s == "[Events]": in_events = True; continue
-        if in_events and s.startswith("Format:"):
-            fields = [f.strip() for f in s[len("Format:"):].split(",")]; continue
-        if in_events and s.startswith("Dialogue:"):
-            events.append(s[len("Dialogue:"):].strip())
-    try:
-        start_idx = fields.index("Start"); end_idx = fields.index("End"); text_idx = fields.index("Text")
-    except ValueError:
-        start_idx, end_idx, text_idx = 1, 2, len(fields) - 1
-    _time_re = re.compile(r"^(\d+):(\d{2}):(\d{2})[.:](\d{1,3})$")
-    def parse_time(t):
-        m = _time_re.match(t.strip())
-        if not m: return None
-        h, mm, ss, frac = m.groups()
-        frac = frac.ljust(3, "0")[:3]
-        return f"{int(h):02d}:{mm}:{ss}.{frac}"
-    _tag_re = re.compile(r"\{[^}]*\}")
-    def clean_text(t):
-        t = _tag_re.sub("", t)
-        t = t.replace("\\N", "\n").replace("\\n", "\n").replace("\\h", " ")
-        t = t.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
-        return "\n".join(l for l in t.split("\n") if l.strip()).strip()
-    out = ["WEBVTT", ""]
-    for ev in events:
-        if re.search(r"\{\\p[1-9]", ev): continue
-        parts = ev.split(",", len(fields) - 1)
-        if len(parts) <= max(start_idx, end_idx, text_idx): continue
-        start = parse_time(parts[start_idx]); end = parse_time(parts[end_idx])
-        if not start or not end: continue
-        text = clean_text(parts[text_idx])
-        if not text: continue
-        out.append(f"{start} --> {end}"); out.append(text); out.append("")
-    return "\n".join(out)
+  const capSel = document.getElementById('caption-select');
+  const capCount = document.getElementById('caption-count');
+  if (capSel){
+    capSel.innerHTML = '<option value="-1">Off</option>';
+    capSel.value = '-1';
+  }
+  if (capCount){ capCount.textContent = '0'; capCount.classList.add('empty'); }
 
+  currentCaptionTrack = -1;
+  currentSubs = [];
+}
 
-# ═══════════════ browser-fingerprint headers ═══════════════
-def _build_cdn_headers(referer, range_hdr=None):
-    h = {
-        "User-Agent": UA,
-        "Accept": "*/*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Sec-Fetch-Dest": "video",
-        "Sec-Fetch-Mode": "no-cors",
-        "Sec-Fetch-Site": "cross-site",
-        "Sec-Ch-Ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
-        "Sec-Ch-Ua-Mobile": "?1",
-        "Sec-Ch-Ua-Platform": '"Android"',
-        "Priority": "u=1, i",
+function updateAudioTracks(){
+  const select = document.getElementById('audio-select');
+  const countEl = document.getElementById('audio-count');
+  if (!select) return;
+
+  const tracks = (hls && Array.isArray(hls.audioTracks)) ? hls.audioTracks : [];
+
+  if (!tracks.length){
+    if (currentStream && currentStream.url){
+      // Single-track stream (mp4 or HLS with only one audio)
+      select.innerHTML = '<option value="0">Original</option>';
+      select.value = '0';
+      select.disabled = true;
+      if (countEl){ countEl.textContent = '1'; countEl.classList.remove('empty'); }
+    } else {
+      select.innerHTML = '<option>No audio yet</option>';
+      select.disabled = true;
+      if (countEl){ countEl.textContent = '—'; countEl.classList.add('empty'); }
     }
-    if referer:
-        h["Referer"] = referer
-        h["Origin"] = _origin(referer)
-    if range_hdr:
-        h["Range"] = range_hdr
-    return h
+    return;
+  }
 
+  const currentIdx = typeof hls.audioTrack === 'number' ? hls.audioTrack : 0;
+  select.innerHTML = tracks.map((t, i) => {
+    const name = t.name || t.lang || `Track ${i + 1}`;
+    const label = t.lang && t.name && t.name !== t.lang ? `${name} · ${t.lang}` : name;
+    return `<option value="${i}"${i === currentIdx ? ' selected' : ''}>${esc(label)}</option>`;
+  }).join('');
+  select.disabled = tracks.length <= 1;
+  if (countEl){ countEl.textContent = String(tracks.length); countEl.classList.remove('empty'); }
+}
 
-def _is_good_media_resp(resp) -> bool:
-    if resp is None or resp.status_code >= 400:
-        return False
-    ct = (resp.headers.get("content-type") or "").lower()
-    return (
-        ct.startswith("video/")
-        or ct.startswith("audio/")
-        or ct.startswith("application/octet-stream")
-        or ct.startswith("application/vnd.apple.mpegurl")
-        or ct.startswith("application/x-mpegurl")
-        or "mpegurl" in ct
-    )
+document.getElementById('audio-select').addEventListener('change', (e) => {
+  const idx = parseInt(e.target.value, 10);
+  if (hls && hls.audioTracks && hls.audioTracks[idx]){
+    hls.audioTrack = idx;
+    addLog('INFO', `audio → ${hls.audioTracks[idx].name || hls.audioTracks[idx].lang}`);
+  }
+});
 
+function updateCaptionTracks(){
+  const select = document.getElementById('caption-select');
+  const countEl = document.getElementById('caption-count');
+  if (!select) return;
 
-CFFI_STRATEGIES = ["chrome131", "chrome120", "safari17_0", "chrome124"]
+  const subs = currentSubs || [];
 
+  if (!subs.length){
+    select.innerHTML = '<option value="-1">Off</option>';
+    select.value = '-1';
+    select.disabled = true;
+    if (countEl){ countEl.textContent = '0'; countEl.classList.add('empty'); }
+    return;
+  }
 
-async def _fetch_media_cffi(url, referer, range_hdr=None, overall_timeout=20.0):
-    """Concurrent cffi fetch. First successful strategy wins; others are cancelled.
-    Returns: (body, content_type, status, label, headers_dict) or
-             (None, None, 0, error_label, {}).
-    """
-    session = await get_cffi()
-    if session is None:
-        return None, None, 0, "curl_cffi not installed", {}
+  select.innerHTML = '<option value="-1">Off</option>' +
+    subs.map((s, i) => {
+      const label = s.label || s.srclang || `Track ${i + 1}`;
+      const lang = s.srclang && s.label && s.label !== s.srclang ? ` · ${s.srclang}` : '';
+      return `<option value="${i}"${i === currentCaptionTrack ? ' selected' : ''}>${esc(label + lang)}</option>`;
+    }).join('');
+  select.disabled = false;
+  if (countEl){ countEl.textContent = String(subs.length); countEl.classList.remove('empty'); }
+}
 
-    async def try_strategy(imp):
-        try:
-            r = await session.get(
-                url,
-                headers=_build_cdn_headers(referer, range_hdr),
-                impersonate=imp,
-                timeout=15,
-                allow_redirects=True,
-            )
-            if _is_good_media_resp(r):
-                hdrs = {}
-                for h in ("content-length", "content-range",
-                          "accept-ranges", "cache-control"):
-                    v = r.headers.get(h)
-                    if v: hdrs[h] = v
-                return (r.content,
-                        r.headers.get("content-type", "application/vnd.apple.mpegurl"),
-                        r.status_code, imp, hdrs)
-            ct = (r.headers.get("content-type") or "")[:40]
-            snip = (r.content[:120].decode("utf-8", "replace").replace("\n", " ")
-                    if r.content else "")
-            log.info(f"[cffi] {imp} → {r.status_code} ct={ct!r} body={snip!r}")
-        except Exception as e:
-            log.info(f"[cffi] {imp} err: {e}")
-        return None
+function applyCaptionTrack(idx){
+  [...video.querySelectorAll('track')].forEach(t => t.remove());
+  currentCaptionTrack = idx;
+  if (idx === -1){
+    addLog('INFO', 'captions off');
+    return;
+  }
+  const s = currentSubs[idx];
+  if (!s){ addLog('WARN', `caption ${idx} missing`); return; }
+  addLog('INFO', `captions → ${s.label || s.srclang || idx}`);
+  const t = document.createElement('track');
+  t.kind = 'subtitles';
+  t.label = s.label || `Track ${idx + 1}`;
+  t.srclang = s.srclang || 'en';
+  t.src = proxySeg(s.url, currentSubsReferer);
+  t.default = true;
+  video.appendChild(t);
+  setTimeout(() => {
+    const tracks = video.textTracks;
+    for (let i = 0; i < tracks.length; i++) tracks[i].mode = 'showing';
+  }, 200);
+}
 
-    tasks = [asyncio.create_task(try_strategy(imp)) for imp in CFFI_STRATEGIES]
-    try:
-        deadline = asyncio.get_event_loop().time() + overall_timeout
-        pending = set(tasks)
-        while pending:
-            remaining = deadline - asyncio.get_event_loop().time()
-            if remaining <= 0:
-                break
-            done, pending = await asyncio.wait(
-                pending, timeout=remaining, return_when=asyncio.FIRST_COMPLETED)
-            if not done:
-                break
-            for t in done:
-                try:
-                    r = t.result()
-                except Exception:
-                    r = None
-                if r is not None:
-                    return r
-    finally:
-        for t in tasks:
-            if not t.done():
-                t.cancel()
-        for t in tasks:
-            try: await t
-            except BaseException: pass
+document.getElementById('caption-select').addEventListener('change', (e) => {
+  applyCaptionTrack(parseInt(e.target.value, 10));
+});
+// ---------------- END TRACK CONTROLS ----------------
 
-    return None, None, 0, "all strategies failed", {}
+// ---------------- VLC INTEGRATION ----------------
+function vlcUrlInputEl(){ return document.getElementById('vlc-url-input'); }
+function vlcMode(){
+  const el = document.querySelector('input[name="vlc-mode"]:checked');
+  return el ? el.value : 'raw';
+}
+function vlcRawUrl(){ return currentStream.url || null; }
+function vlcProxyUrl(){
+  if (!currentStream.url) return null;
+  const u = encodeURIComponent(currentStream.url);
+  const r = currentStream.referer ? `&referer=${encodeURIComponent(currentStream.referer)}` : '';
+  if (currentStream.kind === 'mp4') return `${location.origin}/p/seg?url=${u}${r}`;
+  return `${location.origin}/p/m3u8?url=${u}${r}&abs=1`;
+}
+function vlcUrl(){ return vlcMode() === 'proxy' ? vlcProxyUrl() : vlcRawUrl(); }
 
+function updateVlcHint(){
+  const hint = document.getElementById('vlc-hint');
+  if (!hint) return;
+  if (!currentStream.url){ hint.textContent = 'No stream yet — extracting or paste URL manually'; return; }
+  const mode = vlcMode();
+  const parts = [mode === 'proxy' ? 'Proxied' : 'Raw', String(currentStream.kind || 'hls').toUpperCase()];
+  if (currentStream.provider) parts.push(currentStream.provider);
+  hint.textContent = parts.join(' · ');
+}
+function setVlcStream(url, referer, kind, provider){
+  currentStream = { url: url || '', referer: referer || '', kind: kind || 'hls', provider: provider || '' };
+  const inp = vlcUrlInputEl();
+  if (inp) inp.value = currentStream.url;
+  updateVlcHint();
+}
+function clearVlcStream(){
+  currentStream = { url: '', referer: '', kind: 'hls', provider: '' };
+  const inp = vlcUrlInputEl();
+  if (inp) inp.value = '';
+  updateVlcHint();
+}
 
-async def _fetch_small(url: str, referer: "str | None"):
-    headers = {"User-Agent": UA, "Accept": "*/*"}
-    if referer:
-        headers["Referer"] = referer
-        headers["Origin"] = _origin(referer)
-    return await get_http().get(url, headers=headers)
+(function bindVlcInput(){
+  const inp = vlcUrlInputEl();
+  if (!inp) return;
+  inp.addEventListener('input', e => {
+    const v = e.target.value.trim();
+    currentStream.url = v;
+    if (/\.mp4(\?|$)/i.test(v)) currentStream.kind = 'mp4';
+    else if (/\.m3u8(\?|$)/i.test(v)) currentStream.kind = 'hls';
+    updateVlcHint();
+  });
+})();
 
+async function copyToClipboard(text){
+  try { if (navigator.clipboard) { await navigator.clipboard.writeText(text); return true; } } catch {}
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  } catch { return false; }
+}
 
-def _rewrite_m3u8(text: str, base: str, referer: "str | None",
-                  request_base: "str | None" = None) -> str:
-    """Rewrite a manifest so every sub-URL points back at our proxy.
-    If request_base is set, emit absolute URLs (needed when the player is
-    an external app like VLC that may resolve relative URLs differently).
-    """
-    ref_q = f"&referer={quote(referer, safe='')}" if referer else ""
-    abs_q = "&abs=1" if request_base else ""
+async function copyVlcLink(){
+  const link = vlcUrl();
+  if (!link){ addLog('WARN', 'no VLC link available'); return; }
+  const btn = document.getElementById('vlc-copy');
+  const ok = await copyToClipboard(link);
+  if (ok){
+    addLog('OK', `copied [${vlcMode()}] ${link.length} chars`);
+    btn.textContent = 'Copied!';
+    setTimeout(() => btn.textContent = 'Copy link', 1400);
+  } else {
+    window.prompt('Copy this URL and paste in VLC → New stream:', link);
+  }
+}
 
-    def wrap(u: str) -> str:
-        absu = urljoin(base, u)
-        path = "/p/m3u8" if _is_m3u8_url(absu) else "/p/seg"
-        rel = f"{path}?url={quote(absu, safe='')}{ref_q}{abs_q}"
-        return f"{request_base}{rel}" if request_base else rel
+async function openInVlc(){
+  if (!currentStream.url){
+    addLog('WARN', 'no URL');
+    window.alert('No stream URL yet. Wait for extract, or paste a URL into the field above.');
+    return;
+  }
+  const mode = vlcMode();
+  const btn = document.getElementById('vlc-open');
+  const orig = btn ? btn.textContent : '';
+  if (btn){ btn.disabled = true; btn.textContent = 'Opening…'; }
+  try {
+    const u = encodeURIComponent(currentStream.url);
+    const r = currentStream.referer ? `&referer=${encodeURIComponent(currentStream.referer)}` : '';
+    const resp = await fetch(`/open?url=${u}${r}&kind=${currentStream.kind}&mode=${mode}`);
 
-    out = []
-    for line in text.splitlines():
-        s = line.strip()
-        if not s:
-            out.append(line); continue
-        if s.startswith("#"):
-            if 'URI="' in s:
-                s = re.sub(r'URI="([^"]+)"', lambda m: f'URI="{wrap(m.group(1))}"', s)
-            out.append(s); continue
-        out.append(wrap(s))
-    return "\n".join(out)
+    if (!resp.ok){
+      const txt = await resp.text().catch(() => '');
+      const link = vlcUrl();
+      const copied = link ? await copyToClipboard(link) : false;
+      addLog('ERROR', `VLC launch failed [${mode}]: HTTP ${resp.status} — copied=${copied}`);
 
-
-# ═══════════════ /p/m3u8 ═══════════════
-@app.get("/p/m3u8")
-async def proxy_m3u8(request: Request, url: str,
-                     referer: "str | None" = None,
-                     direct: int = 0, abs: int = 0):
-    if direct:
-        log.info("/p/m3u8 DIRECT redirect")
-        return RedirectResponse(url=url, status_code=302)
-
-    request_base = str(request.base_url).rstrip("/") if abs else None
-
-    if HAS_CFFI:
-        body, ct, status, label, _hdrs = await _fetch_media_cffi(url, referer)
-        if body is not None:
-            return Response(
-                content=_rewrite_m3u8(body.decode("utf-8", "replace"),
-                                      url, referer, request_base),
-                media_type="application/vnd.apple.mpegurl",
-            )
-        log.warning(f"/p/m3u8 cffi failed ({label}), trying httpx")
-
-    # httpx fallback
-    try:
-        r = await _fetch_small(url, referer)
-    except Exception as e:
-        return Response(content=f"upstream error: {e}".encode(),
-                        status_code=502, media_type="text/plain")
-    if r.status_code != 200:
-        return Response(content=r.content, status_code=r.status_code,
-                        media_type=r.headers.get("content-type", "text/plain"))
-    return Response(content=_rewrite_m3u8(r.text, url, referer, request_base),
-                    media_type="application/vnd.apple.mpegurl")
-
-
-# ═══════════════ /p/seg ═══════════════
-@app.get("/p/seg")
-async def proxy_seg(request: Request, url: str,
-                    referer: "str | None" = None,
-                    direct: int = 0, abs: int = 0):
-    if direct:
-        log.info("/p/seg DIRECT redirect")
-        return RedirectResponse(url=url, status_code=302)
-
-    if _is_m3u8_url(url):
-        return await proxy_m3u8(request, url, referer, direct=direct, abs=abs)
-
-    # ASS/SSA → VTT
-    if _is_ass_url(url):
-        try:
-            r = await _fetch_small(url, referer)
-        except Exception as e:
-            return Response(content=f"upstream error: {e}".encode(),
-                            status_code=502, media_type="text/plain")
-        if r.status_code != 200:
-            return Response(content=r.content, status_code=r.status_code,
-                            media_type=r.headers.get("content-type", "text/plain"))
-        try:
-            text = r.content.decode("utf-8-sig")
-        except UnicodeDecodeError:
-            text = r.content.decode("cp1252", errors="replace")
-        if not text.strip() or text.lstrip().startswith("<"):
-            return Response(content=r.content, status_code=200,
-                            media_type="text/plain; charset=utf-8")
-        try:
-            vtt = _ass_to_vtt(text)
-            cues = max(0, vtt.count("-->"))
-            log.info(f"ass→vtt {cues} cues")
-            return Response(content=vtt.encode("utf-8"),
-                            media_type="text/vtt; charset=utf-8",
-                            headers={"Cache-Control": "public, max-age=3600"})
-        except Exception as e:
-            log.warning(f"ass→vtt failed: {e}")
-            return Response(content=r.content, status_code=200,
-                            media_type="text/plain; charset=utf-8")
-
-    range_hdr = request.headers.get("range")
-    is_mp4 = _is_mp4_url(url)
-    use_cffi = HAS_CFFI and not (FORCE_HTTPX_MP4 and is_mp4)
-
-    # ── cffi path first (for TLS bypass) ──
-    if use_cffi:
-        body, ct, status, label, hdrs = await _fetch_media_cffi(url, referer, range_hdr)
-        if body is not None:
-            # Only sanity-check the mp4 magic on full requests — Range
-            # responses legitimately start mid-file.
-            if is_mp4 and not range_hdr and not _looks_like_mp4(body[:16384]):
-                log.warning(f"non-MP4 at .mp4 URL via cffi: {url[:100]}")
-                return Response(content=b"upstream returned non-MP4",
-                                status_code=502, media_type="text/plain")
-            if is_mp4 and len(body) > 100 * 1024 * 1024:
-                log.warning(f"/p/seg buffered {len(body)//(1024*1024)}MB via cffi for {url[:80]}")
-            out_hdrs = {"Accept-Ranges": "bytes", "Cache-Control": "public, max-age=300"}
-            for h in ("content-length", "content-range"):
-                if h in hdrs:
-                    out_hdrs[h.title()] = hdrs[h]
-            return Response(content=body, status_code=status,
-                            media_type=ct or "application/octet-stream",
-                            headers=out_hdrs)
-        log.warning(f"/p/seg cffi failed ({label}), trying httpx")
-
-    # ── httpx streaming fallback ──
-    fwd_headers = {"User-Agent": UA, "Accept": "*/*"}
-    if referer:
-        fwd_headers["Referer"] = referer
-        fwd_headers["Origin"] = _origin(referer)
-    if range_hdr:
-        fwd_headers["Range"] = range_hdr
-
-    client = get_http()
-    try:
-        req = client.build_request("GET", url, headers=fwd_headers)
-        upstream = await client.send(req, stream=True)
-    except Exception as e:
-        return Response(content=f"upstream error: {e}".encode(),
-                        status_code=502, media_type="text/plain")
-
-    ct = (upstream.headers.get("content-type") or "").lower()
-
-    if "mpegurl" in ct:
-        body = await upstream.aread(); await upstream.aclose()
-        text = body.decode("utf-8", errors="replace")
-        request_base = str(request.base_url).rstrip("/") if abs else None
-        return Response(content=_rewrite_m3u8(text, url, referer, request_base),
-                        media_type="application/vnd.apple.mpegurl")
-
-    if "text/html" in ct:
-        await upstream.aclose()
-        log.warning(f"HTML returned for media: {url[:100]}")
-        return Response(content=b"upstream returned HTML",
-                        status_code=502, media_type="text/plain")
-
-    if is_mp4 and not range_hdr:
-        head_chunks = []
-        head_total = 0
-        async for chunk in upstream.aiter_raw(chunk_size=8192):
-            head_chunks.append(chunk)
-            head_total += len(chunk)
-            if head_total >= 16384: break
-        head = b"".join(head_chunks)
-        if not _looks_like_mp4(head):
-            await upstream.aclose()
-            log.warning(f"non-MP4 at .mp4 URL: {url[:100]}")
-            return Response(content=b"upstream returned non-MP4",
-                            status_code=502, media_type="text/plain")
-
-        out_headers = {}
-        for h in ("content-type", "content-length", "content-range",
-                  "accept-ranges", "cache-control"):
-            v = upstream.headers.get(h)
-            if v: out_headers[h.title()] = v
-
-        async def mp4_body():
-            try:
-                yield head
-                async for chunk in upstream.aiter_raw(chunk_size=65536):
-                    yield chunk
-            finally:
-                await upstream.aclose()
-
-        return StreamingResponse(mp4_body(), status_code=upstream.status_code,
-                                 headers=out_headers)
-
-    out_headers = {}
-    for h in ("content-type", "content-length", "content-range",
-              "accept-ranges", "cache-control"):
-        v = upstream.headers.get(h)
-        if v: out_headers[h.title()] = v
-
-    async def body():
-        try:
-            async for chunk in upstream.aiter_raw(chunk_size=65536):
-                yield chunk
-        finally:
-            await upstream.aclose()
-
-    return StreamingResponse(body(), status_code=upstream.status_code,
-                             headers=out_headers)
-
-
-# ═══════════════ VLC launcher ═══════════════
-def _launch_vlc(url: str, mime: str) -> "tuple[bool, str]":
-    """Launch an Android app for a URL. Tries termux-am, then am."""
-    am = shutil.which("termux-am") or shutil.which("am")
-    if not am:
-        return False, "termux-am / am not found (pkg install termux-am)"
-    last_err = ""
-    # Try with -p org.videolan.vlc first; some builds reject -p, fall back without.
-    for extra in (["-p", "org.videolan.vlc"], []):
-        try:
-            r = subprocess.run(
-                [am, "start", "-a", "android.intent.action.VIEW",
-                 "-d", url, "-t", mime] + extra,
-                capture_output=True, timeout=8,
-            )
-            if r.returncode == 0:
-                return True, ""
-            last_err = (r.stderr or b"").decode("utf-8", "replace")[:200]
-        except Exception as e:
-            last_err = str(e)
-    return False, last_err or "launch failed"
-
-
-@app.get("/open")
-async def open_vlc(request: Request, url: str,
-                   referer: str = "", kind: str = "hls"):
-    """Open a stream in VLC via am start. Rewrites the manifest through the
-    local proxy so VLC gets a Referer-carrying pipeline.
-    Local-only — refuses non-loopback clients.
-    """
-    client = request.client.host if request.client else ""
-    if client not in ("127.0.0.1", "::1", "localhost"):
-        return Response(content=b"local only", status_code=403)
-
-    base = str(request.base_url).rstrip("/")
-
-    if kind == "mp4" or _is_mp4_url(url):
-        mime = "video/mp4"
-        target = f"{base}/p/seg?url={quote(url, safe='')}"
-    else:
-        mime = "application/x-mpegURL"
-        target = f"{base}/p/m3u8?url={quote(url, safe='')}&abs=1"
-    if referer:
-        target += f"&referer={quote(referer, safe='')}"
-
-    ok, err = _launch_vlc(target, mime)
-    log.info(f"VLC open {mime}: {target[:120]} → {'ok' if ok else err}")
-    if not ok:
-        return Response(content=f"launch failed: {err}".encode(),
-                        status_code=500, media_type="text/plain")
-    return {"ok": True, "target": target, "mime": mime}
-
-
-# ═══════════════ server-side recent-URL history ═══════════════
-RECENT_FILE = os.path.join(CACHE_DIR, "_recent.json")
-RECENT_MAX = 50
-_recent_lock = asyncio.Lock()
-
-def _recent_load() -> list:
-    try:
-        with open(RECENT_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return []
-
-def _recent_save(items: list):
-    try:
-        tmp = RECENT_FILE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(items[:RECENT_MAX], f)
-        os.replace(tmp, RECENT_FILE)
-    except Exception as e:
-        log.warning(f"recent save failed: {e}")
-
-@app.get("/recent")
-async def recent_list():
-    return {"items": _recent_load()}
-
-@app.post("/recent")
-async def recent_add(request: Request):
-    try:
-        data = await request.json()
-    except Exception:
-        return Response(status_code=400, content=b"bad json")
-    url = data.get("url", "")
-    if not url:
-        return Response(status_code=400, content=b"url required")
-    entry = {
-        "url": url,
-        "referer": data.get("referer", ""),
-        "provider": data.get("provider", ""),
-        "animeId": data.get("animeId"),
-        "ep": data.get("ep"),
-        "kind": data.get("kind", "hls"),
-        "ts": int(time.time()),
+      const msg = copied
+        ? `VLC couldn't be launched automatically (${resp.status}).\n\n✓ The URL has been copied to your clipboard.\n\nOpen VLC → Menu (☰) → New stream → Paste → Play.\n\n${txt.slice(0, 200)}`
+        : `VLC couldn't be launched (${resp.status}).\n\nCopy the URL manually:\n${link || ''}\n\n${txt.slice(0, 200)}`;
+      window.alert(msg);
+      return;
     }
-    async with _recent_lock:
-        items = [e for e in _recent_load() if e.get("url") != url]
-        items.insert(0, entry)
-        _recent_save(items)
-    return {"ok": True, "count": len(items)}
-
-@app.delete("/recent")
-async def recent_clear():
-    async with _recent_lock:
-        _recent_save([])
-    return {"ok": True}
-
-
-# ═══════════════ health ═══════════════
-@app.get("/health")
-async def health():
-    n_cache = 0
-    try:
-        n_cache = len([f for f in os.listdir(CACHE_DIR) if f.endswith(".json")])
-    except Exception:
-        pass
-    return {
-        "ok": True,
-        "cffi": HAS_CFFI,
-        "strategies": CFFI_STRATEGIES,
-        "timeouts": TIMEOUTS,
-        "cache_entries": n_cache,
-        "recent_entries": len(_recent_load()),
-        "force_httpx_mp4": FORCE_HTTPX_MP4,
+    const j = await resp.json().catch(() => ({}));
+    addLog('OK', `VLC open [${mode}] → ${(j.target || '').slice(0, 100)}`);
+    if (btn){ btn.textContent = '✓ Sent to VLC'; }
+  } catch(e){
+    addLog('ERROR', `VLC launch error: ${e.message}`);
+    window.alert('VLC launch error: ' + e.message);
+  } finally {
+    if (btn){
+      setTimeout(() => { btn.disabled = false; btn.textContent = orig || '▶ Open in VLC'; }, 1500);
     }
+  }
+}
+document.getElementById('vlc-copy').addEventListener('click', copyVlcLink);
+document.getElementById('vlc-open').addEventListener('click', openInVlc);
+document.getElementById('vlc-mode').addEventListener('change', updateVlcHint);
+// ---------------- END VLC ----------------
 
+// ---------------- CACHES ----------------
+function getCachedExtract(id, ep, type){
+  try {
+    const raw = sessionStorage.getItem(extractKey(id, ep, type));
+    if (!raw) return null;
+    const { data, ts } = JSON.parse(raw);
+    if (Date.now() - ts > EXTRACT_TTL_MS) return null;
+    return data;
+  } catch { return null; }
+}
+function cacheExtract(id, ep, type, data){
+  try { sessionStorage.setItem(extractKey(id, ep, type), JSON.stringify({ data, ts: Date.now() })); } catch {}
+}
+function clearExtractCache(id, ep, type){
+  try { sessionStorage.removeItem(extractKey(id, ep, type)); } catch {}
+}
 
-app.mount("/ui", StaticFiles(directory="static", html=True), name="static")
+function getSticky(id, ep, type){
+  try {
+    const raw = localStorage.getItem(stickyKey(id, ep, type));
+    if (!raw) return null;
+    const { url, referer, ts } = JSON.parse(raw);
+    if (Date.now() - ts > STICKY_TTL_MS) return null;
+    return { url, referer };
+  } catch { return null; }
+}
+function saveSticky(id, ep, type, url, referer){
+  try {
+    localStorage.setItem(stickyKey(id, ep, type), JSON.stringify({ url, referer, ts: Date.now() }));
+    addLog('INFO', `sticky saved ep=${ep}`);
+  } catch {}
+}
+function clearSticky(id, ep, type){
+  try { localStorage.removeItem(stickyKey(id, ep, type)); } catch {}
+}
 
-if not any(getattr(r, "path", None) == "/" for r in app.routes):
-    @app.get("/")
-    def _root():
-        return RedirectResponse(url="/ui/")
+// ---------------- EXTRACT ----------------
+async function tryProvider(ep, type, provider, nc){
+  addLog('INFO', `prov: ${provider}${nc ? ' [fresh]' : ''}`);
+  try {
+    const data = await fetchJSON(
+      `/anime/extract/${anilistId}?e=${ep}&type=${type}&provider=${provider}${nc}`,
+      EXTRACT_TIMEOUT_MS, `extract:${provider}`
+    );
+    const stream = (data.streams || []).find(s => s.isActive !== false);
+    if (!stream){ addLog('WARN', `${provider}: empty streams`); return null; }
+    if (isEmbedStream(stream)){ addLog('WARN', `${provider}: embed only`); return null; }
+    if (!isHlsStream(stream) && !isMp4Stream(stream)){
+      addLog('WARN', `${provider}: unknown "${stream.type}"`); return null;
+    }
+    addLog('OK', `✓ ${provider} → ${stream.type || 'hls'}`);
+    return data;
+  } catch(e){
+    addLog('WARN', `${provider} failed: ${e.message}`);
+    return null;
+  }
+}
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+async function fullRace(ep, type, { deep = false, nocache = false } = {}){
+  const nc = nocache ? '&nocache=1' : '';
+  const d  = deep ? '&deep=1' : '';
+  const raceMs = deep ? DEEP_RACE_TIMEOUT_MS : FULL_RACE_TIMEOUT_MS;
+  const label = deep ? `Deep race (${raceMs/1000}s)` : `Full race (${raceMs/1000}s)`;
+  showOverlay('', false, label);
+  setStatus('Racing providers', 'loading');
+  addLog('INFO', `${deep ? 'DEEP' : 'FULL'} race ep=${ep}`);
+  return await fetchJSON(`/anime/extract/${anilistId}?e=${ep}&type=${type}${nc}${d}`, raceMs + 5000, deep ? 'deep-race' : 'race');
+}
+
+async function extractFast(ep, type, { silent = false, nocache = false, deep = false } = {}){
+  const cached = !nocache && getCachedExtract(anilistId, ep, type);
+  if (cached){ addLog('INFO', `extract ep=${ep} [cache hit] provider=${cached.provider}`); return cached; }
+  if (silent) return null;
+
+  const nc = nocache ? '&nocache=1' : '';
+  const provider = currentProvider;
+  addLog('INFO', `using server: ${provider}`);
+  const data = await tryProvider(ep, type, provider, nc);
+  if (data){ cacheExtract(anilistId, ep, type, data); return data; }
+
+  if (provider !== DEFAULT_PROVIDER){
+    throw new Error(`Server "${provider}" has no playable stream. Pick another server.`);
+  }
+  addLog('WARN', `${provider} empty — full race`);
+  const raceData = await fullRace(ep, type, { deep, nocache });
+  if (!raceData.streams?.length) throw new Error('No streams from any provider');
+  cacheExtract(anilistId, ep, type, raceData);
+  addLog('OK', `race won by ${raceData.provider}`);
+  return raceData;
+}
+
+function proxyM3U8(url, referer){
+  let p = `/p/m3u8?url=${encodeURIComponent(url)}`;
+  if (referer) p += `&referer=${encodeURIComponent(referer)}`;
+  return p;
+}
+function proxySeg(url, referer){
+  let p = `/p/seg?url=${encodeURIComponent(url)}`;
+  if (referer) p += `&referer=${encodeURIComponent(referer)}`;
+  return p;
+}
+
+// ---------------- EPISODES ----------------
+function getCachedEpisodes(id){
+  try {
+    const raw = sessionStorage.getItem(epsKey(id));
+    if (!raw) return null;
+    const { data, ts } = JSON.parse(raw);
+    if (Date.now() - ts > EPS_TTL_MS) return null;
+    return data;
+  } catch { return null; }
+}
+function cacheEpisodes(id, data){
+  try { sessionStorage.setItem(epsKey(id), JSON.stringify({ data, ts: Date.now() })); } catch {}
+}
+
+function episodesFor(type){
+  if (episodes?.providers){
+    for (const key of Object.keys(episodes.providers)){
+      const list = episodes.providers[key]?.episodes?.[type];
+      if (list?.length) return list;
+    }
+  }
+  if (fakeEpisodes) return fakeEpisodes;
+  return [];
+}
+
+function renderEpisodes(){
+  const list = episodesFor(currentType);
+  if (!list.length){
+    epList.innerHTML = `<span class="hint">No ${currentType} episodes available.</span>`;
+    return;
+  }
+  epList.innerHTML = list.map(e =>
+    `<button data-ep="${e.number}" class="${e.number===currentEp?'active':''}">${e.number}</button>`
+  ).join('');
+  const active = epList.querySelector('button.active');
+  if (active) active.scrollIntoView({ block: 'nearest' });
+  epSource.textContent = episodes ? '' : '(estimated)';
+}
+
+function pickFallbackEp(type){
+  const list = episodesFor(type);
+  if (!list.length) return null;
+  return list.some(e => e.number===currentEp) ? currentEp : list[0].number;
+}
+
+async function loadEpisodesBackground(){
+  const cached = getCachedEpisodes(anilistId);
+  if (cached){
+    episodes = cached;
+    const fb = pickFallbackEp(currentType);
+    if (fb && !params.get('ep')) currentEp = fb;
+    renderEpisodes();
+    addLog('INFO', 'episodes from cache');
+    return;
+  }
+  addLog('INFO', 'loading episodes…');
+  try {
+    const data = await fetchJSON(`/anime/episodes/${anilistId}`, 130000, 'episodes');
+    episodes = data;
+    cacheEpisodes(anilistId, data);
+    const fb = pickFallbackEp(currentType);
+    if (fb && !params.get('ep')) currentEp = fb;
+    renderEpisodes();
+    addLog('OK', 'episodes loaded');
+  } catch(e){
+    addLog('ERROR', `episodes failed: ${e.message}`);
+  }
+}
+
+// ---------------- ATTACH SUBTITLES ----------------
+function attachSubtitles(subs, referer){
+  [...video.querySelectorAll('track')].forEach(t => t.remove());
+  currentSubs = subs || [];
+  currentSubsReferer = referer;
+  currentCaptionTrack = -1;
+  updateCaptionTracks();
+  if (currentSubs.length) addLog('INFO', `CC: ${currentSubs.length} track(s)`);
+}
+
+function clearStartupTimer(){
+  if (startupTimer){ clearTimeout(startupTimer); startupTimer = null; }
+}
+
+// ---------------- OVERLAY ----------------
+function showOverlay(msg, err=false, timerPrefix=null){
+  overlay.innerHTML = '';
+  overlay.classList.toggle('err', err);
+  overlay.classList.remove('hidden');
+
+  if (timerPrefix){
+    const spinner = document.createElement('div');
+    spinner.className = 'spinner';
+    overlay.appendChild(spinner);
+
+    const start = Date.now();
+    const text = document.createElement('div');
+    text.textContent = `${timerPrefix}… 0s`;
+    text.style.cssText = 'margin-top:6px;font-size:13px;color:var(--muted);font-weight:500';
+    overlay.appendChild(text);
+    if (overlayTimer) clearInterval(overlayTimer);
+    overlayTimer = setInterval(() => {
+      text.textContent = `${timerPrefix}… ${Math.round((Date.now()-start)/1000)}s`;
+    }, 1000);
+  } else {
+    if (overlayTimer){ clearInterval(overlayTimer); overlayTimer = null; }
+    if (msg){
+      const text = document.createElement('div');
+      text.textContent = msg;
+      overlay.appendChild(text);
+    }
+  }
+
+  if (!err && currentStream && currentStream.url){
+    const btn = document.createElement('button');
+    btn.textContent = '▶ Open in VLC (faster)';
+    btn.className = 'btn-accent';
+    btn.style.cssText = 'margin-top:16px;padding:12px 24px;max-width:280px;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer';
+    btn.addEventListener('click', (e) => { e.stopPropagation(); openInVlc(); });
+    overlay.appendChild(btn);
+  }
+}
+function hideOverlay(){
+  if (overlayTimer){ clearInterval(overlayTimer); overlayTimer = null; }
+  overlay.classList.add('hidden');
+  overlay.innerHTML = '';
+}
+
+async function fetchJSON(url, ms = 30000, tag = ''){
+  const t0 = performance.now();
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  try {
+    const r = await fetch(url, { signal: ctrl.signal });
+    const dt = Math.round(performance.now() - t0);
+    let body = null;
+    try { body = await r.json(); } catch {}
+    if (!r.ok){
+      addLog('WARN', `${tag} ${r.status} ${dt}ms`);
+      const e = new Error(`HTTP ${r.status}`);
+      e.status = r.status; e.body = body; e.timeout = !!body?.timeout;
+      throw e;
+    }
+    addLog('INFO', `${tag} 200 ${dt}ms`);
+    return body;
+  } catch(e){
+    if (e.name === 'AbortError'){
+      addLog('ERROR', `${tag} TIMEOUT ${ms}ms`);
+      const ne = new Error(`Timed out after ${ms/1000}s`);
+      ne.timeout = true; ne.status = 0;
+      throw ne;
+    }
+    throw e;
+  } finally { clearTimeout(t); }
+}
+
+const isMp4Stream   = s => s?.type === 'mp4' || /\.mp4(\?|$)/i.test(s?.url || '');
+const isEmbedStream = s => s?.type === 'embed';
+const isHlsStream   = s => !s?.type || s.type === 'hls' || /\.m3u8(\?|$)/i.test(s?.url || '');
+
+// ---------------- PLAY ----------------
+function playFromData(data){
+  const active = (data.streams || []).filter(s => s.isActive !== false);
+  const stream = active.find(isHlsStream) || active.find(isMp4Stream) || active[0] || (data.streams && data.streams[0]);
+  if (!stream){ showProviderError('any', 'No streams in response'); return; }
+
+  const subs = stream.subtitles || data.subtitles || [];
+  const provider = data.provider || currentProvider;
+  addLog('INFO', `stream: provider=${provider} type=${stream.type || 'hls'} subs=${subs.length}`);
+
+  if (isEmbedStream(stream)){ showProviderError(provider, 'returned embed, not playable'); return; }
+
+  setMetaBadge('meta-provider', provider);
+  setMetaBadge('meta-quality', stream.type === 'mp4' ? 'MP4' : 'HLS');
+
+  if (isHlsStream(stream)){
+    if (overlayTimer){ clearInterval(overlayTimer); overlayTimer = null; }
+    setVlcStream(stream.url, stream.referer, 'hls', provider);
+    showOverlay('Connecting…');
+    setStatus('Loading HLS', 'loading');
+    loadHls(proxyM3U8(stream.url, stream.referer), subs, stream.referer, provider, stream.url);
+  } else if (isMp4Stream(stream)){
+    setVlcStream(stream.url, stream.referer, 'mp4', provider);
+    showOverlay('Connecting (MP4)…', false);
+    setStatus('Loading MP4', 'loading');
+    loadMp4(stream, subs, provider);
+  } else {
+    showProviderError(provider, `unsupported type "${stream.type}"`);
+  }
+  history.replaceState(null, '', `?id=${anilistId}&ep=${currentEp}&type=${currentType}`);
+}
+
+async function play(nocache = false, { deep = false } = {}){
+  if (busy) return;
+  busy = true;
+
+  resetTrackControls();
+
+  const sticky = getSticky(anilistId, currentEp, currentType);
+  if (sticky){
+    const kind = /\.mp4(\?|$)/i.test(sticky.url) ? 'mp4' : 'hls';
+    setVlcStream(sticky.url, sticky.referer, kind, 'sticky');
+    addLog('INFO', 'VLC prepopulated from sticky');
+  } else {
+    clearVlcStream();
+  }
+
+  renderEpisodes();
+  setStatus('Extracting', 'loading');
+  addLog('INFO', `play ep=${currentEp} type=${currentType} nocache=${nocache} deep=${deep}`);
+
+  if (STREAM_URL_OVERRIDE){
+    addLog('INFO', `override URL active`);
+    const overrideKind = /\.mp4(\?|$)/i.test(STREAM_URL_OVERRIDE) ? 'mp4' : 'hls';
+    setVlcStream(STREAM_URL_OVERRIDE, STREAM_REF_OVERRIDE, overrideKind, 'override');
+    setMetaBadge('meta-provider', 'override');
+    showOverlay('Connecting to override…');
+    setStatus('Override', 'loading');
+    loadHls(proxyM3U8(STREAM_URL_OVERRIDE, STREAM_REF_OVERRIDE), [], STREAM_REF_OVERRIDE, 'override', STREAM_URL_OVERRIDE);
+    busy = false;
+    return;
+  }
+
+  const cached = !nocache && getCachedExtract(anilistId, currentEp, currentType);
+  showOverlay(cached ? 'Loading stream…' : '', false, cached ? null : 'Extracting stream');
+
+  try {
+    const data = await extractFast(currentEp, currentType, { nocache, deep });
+    if (!data) throw new Error('No stream');
+    playFromData(data);
+  } catch(e){
+    addLog('WARN', `extract failed: ${e.message}`);
+    if (sticky){
+      addLog('WARN', `using sticky URL`);
+      showOverlay('Trying cached URL…');
+      loadHls(proxyM3U8(sticky.url, sticky.referer), [], sticky.referer, 'sticky', sticky.url);
+    } else {
+      addLog('ERROR', `play failed: ${e.message}`);
+      showProviderError(currentProvider, e.message + ' — or paste a URL into the External Player field');
+    }
+  } finally { busy = false; }
+}
+
+// ---------------- ERROR ----------------
+function showProviderError(provider, reason){
+  if (hls){ try { hls.destroy(); } catch(_){} hls = null; }
+  clearStartupTimer();
+  setStatus('Failed', 'error');
+
+  overlay.classList.add('err');
+  overlay.classList.remove('hidden');
+  overlay.innerHTML = `
+    <div style="display:flex;flex-direction:column;align-items:center;gap:14px;max-width:420px;padding:0 20px;text-align:center">
+      <div style="font-size:15px;font-weight:700">Stream failed · <span style="color:var(--accent2,#a78bfa)">${esc(provider)}</span></div>
+      <div style="font-size:12px;opacity:.75;line-height:1.55">${esc(reason || 'Manifest did not load')}</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin-top:6px">
+        ${currentStream && currentStream.url ? '<button id="overlay-vlc" class="btn-accent" style="padding:10px 20px;max-width:180px">▶ Play in VLC</button>' : ''}
+        <button id="overlay-reload" class="btn-ghost" style="padding:10px 18px;max-width:120px">Reload</button>
+        <button id="overlay-next" class="btn-ghost" style="padding:10px 18px;max-width:130px">Next server</button>
+        <button id="overlay-back" class="btn-ghost" style="padding:10px 18px;max-width:100px">Back</button>
+      </div>
+    </div>`;
+
+  const vlcBtn = document.getElementById('overlay-vlc');
+  if (vlcBtn) vlcBtn.addEventListener('click', (e) => { e.stopPropagation(); openInVlc(); });
+  const reloadBtn = document.getElementById('overlay-reload');
+  if (reloadBtn) reloadBtn.addEventListener('click', () => location.reload());
+  const nextBtn = document.getElementById('overlay-next');
+  if (nextBtn) nextBtn.addEventListener('click', () => {
+    const idx = PROVIDER_LIST.indexOf(currentProvider);
+    const next = PROVIDER_LIST[(idx + 1) % PROVIDER_LIST.length];
+    currentProvider = next;
+    try { sessionStorage.setItem(PROVIDER_STORAGE_KEY, currentProvider); } catch {}
+    const sel = document.getElementById('provider-select');
+    if (sel) sel.value = currentProvider;
+    clearExtractCache(anilistId, currentEp, currentType);
+    play(true, { deep: false });
+  });
+  const backBtn = document.getElementById('overlay-back');
+  if (backBtn) backBtn.addEventListener('click', () => {
+    if (history.length > 1) history.back();
+    else location.href = './index.html';
+  });
+}
+
+// ---------------- VIDEO ELEMENT ERRORS ----------------
+video.addEventListener('error', () => {
+  if (!video.error) return;
+  const codes = { 1: 'Aborted', 2: 'Network error', 3: 'Decode error', 4: 'Format not supported' };
+  const msg = codes[video.error.code] || `Error ${video.error.code}`;
+  addLog('ERROR', `video.error: ${msg}`);
+  if (video.readyState === 0){
+    showProviderError(currentProvider, msg);
+  }
+});
+
+// ---------------- MP4 ----------------
+function loadMp4(stream, subs, provider){
+  if (hls){ hls.destroy(); hls = null; }
+  clearStartupTimer();
+  video.removeAttribute('src'); video.load();
+  attachSubtitles(subs, stream.referer);
+  video.src = proxySeg(stream.url, stream.referer);
+  video.load();
+
+  startupTimer = setTimeout(() => {
+    if (video.readyState < 2){
+      showProviderError(provider, 'MP4 source did not start');
+    }
+  }, 15000);
+
+  const onPlaying = () => {
+    clearStartupTimer(); hideOverlay();
+    setStatus('Playing', 'playing');
+    saveSticky(anilistId, currentEp, currentType, stream.url, stream.referer);
+    updateAudioTracks();
+    video.removeEventListener('playing', onPlaying);
+  };
+  video.addEventListener('playing', onPlaying);
+
+  video.play().catch(()=>{});
+}
+
+// ---------------- HLS ----------------
+function loadHls(src, subs, referer, provider, rawUrl){
+  if (hls){ hls.destroy(); hls = null; }
+  clearStartupTimer();
+  video.removeAttribute('src'); video.load();
+  attachSubtitles(subs, referer);
+
+  if (window.Hls && Hls.isSupported()){
+    hls = new Hls({
+      // Core
+      enableWorker: true,
+      lowLatencyMode: false,
+      debug: false,
+
+      // Adaptive bitrate — auto (no forcing, no capping)
+      startLevel: -1,
+      testBandwidth: false,
+      startFragPrefetch: true,
+      abrEwmaDefaultEstimate: 1000000,
+      abrBandWidthFactor: 0.95,
+      abrBandWidthUpFactor: 0.75,
+
+      // Buffering — generous for slow mobile networks
+      maxBufferLength: 30,
+      maxMaxBufferLength: 60,
+      maxBufferSize: 60 * 1000 * 1000,
+      maxBufferHole: 0.5,
+      backBufferLength: 30,
+
+      // Manifest retry — long timeout, many retries
+      manifestLoadingTimeOut: 20000,
+      manifestLoadingMaxRetry: 5,
+      manifestLoadingRetryDelay: 500,
+      manifestLoadingMaxRetryTimeout: 64000,
+
+      // Level (variant) retry
+      levelLoadingTimeOut: 20000,
+      levelLoadingMaxRetry: 6,
+      levelLoadingRetryDelay: 500,
+      levelLoadingMaxRetryTimeout: 64000,
+
+      // Fragment retry
+      fragLoadingTimeOut: 20000,
+      fragLoadingMaxRetry: 8,
+      fragLoadingRetryDelay: 500,
+      fragLoadingMaxRetryTimeout: 64000,
+
+      // Append retry
+      appendErrorMaxRetry: 5,
+
+      // Stall/recovery
+      maxStarvationDelay: 4,
+      maxLoadingDelay: 4,
+
+      // Codec init — some streams need this off
+      enableWebVTT: true,
+      enableIMSC1: false,
+      enableCEA708Captions: false,
+    });
+    hls.loadSource(src);
+    hls.attachMedia(video);
+
+    // Audio tracks may populate at different stages — listen to all
+    hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, () => {
+      addLog('INFO', `audio tracks updated: ${hls.audioTracks?.length || 0}`);
+      updateAudioTracks();
+    });
+    hls.on(Hls.Events.AUDIO_TRACK_SWITCHED, () => updateAudioTracks());
+    hls.on(Hls.Events.AUDIO_TRACK_LOADING, (_, d) => {
+      addLog('DEBUG', `audio loading: ${d.url?.slice(0, 80)}`);
+    });
+
+    startupTimer = setTimeout(() => {
+      if (video.readyState < 2){
+        addLog('ERROR', `startup timeout ${STARTUP_TIMEOUT_MS/1000}s`);
+        showProviderError(provider, `Stream did not start within ${STARTUP_TIMEOUT_MS/1000}s`);
+      }
+    }, STARTUP_TIMEOUT_MS);
+
+    hls.on(Hls.Events.MANIFEST_PARSED, (_, d) => {
+      addLog('OK', `HLS manifest: ${d.levels?.length ?? '?'} levels`);
+      const heights = (hls.levels || []).map(l => l.height).filter(h => h > 0);
+      if (heights.length) {
+        const maxH = Math.max(...heights);
+        if (maxH) setMetaBadge('meta-quality', `${maxH}p`);
+      }
+      updateAudioTracks();
+      showOverlay('Buffering…');
+      video.play().catch(()=>{});
+    });
+
+    hls.on(Hls.Events.LEVEL_SWITCHED, (_, d) => {
+      const h = hls.levels?.[d.level]?.height;
+      if (h) setMetaBadge('meta-quality', `${h}p`);
+    });
+
+    const onPlaying = () => {
+      clearStartupTimer(); hideOverlay();
+      setStatus('Playing', 'playing');
+      if (rawUrl) saveSticky(anilistId, currentEp, currentType, rawUrl, referer);
+      video.removeEventListener('playing', onPlaying);
+    };
+    video.addEventListener('playing', onPlaying);
+
+    hls.on(Hls.Events.ERROR, (_, d) => {
+      if (!d.fatal) {
+        if (d.details && /bufferStalledError|bufferSeekOverHole|fragParsingError/i.test(d.details)){
+          addLog('DEBUG', `HLS non-fatal: ${d.details}`);
+        }
+        return;
+      }
+      addLog('ERROR', `HLS fatal: ${d.type} / ${d.details}`);
+      clearStartupTimer();
+
+      // Manifest errors — destroy + report
+      if (/manifest/i.test(d.details || '')){
+        if (hls){ try { hls.destroy(); } catch(_){} hls = null; }
+        clearSticky(anilistId, currentEp, currentType);
+        showProviderError(provider, `Manifest did not load (${d.details})`);
+        return;
+      }
+
+      // Network error — retry
+      if (d.type === Hls.ErrorTypes.NETWORK_ERROR){
+        showOverlay('Network error, retrying…', true);
+        try { hls.startLoad(); } catch(_) {}
+        return;
+      }
+
+      // Media error — try recover, then swap codec + recover
+      if (d.type === Hls.ErrorTypes.MEDIA_ERROR){
+        showOverlay('Media error, recovering…', true);
+        try {
+          hls.recoverMediaError();
+        } catch(_){
+          try {
+            hls.swapAudioCodec();
+            hls.recoverMediaError();
+          } catch(_){
+            showProviderError(provider, `Playback failed: ${d.details}`);
+          }
+        }
+        return;
+      }
+
+      showProviderError(provider, `Playback failed: ${d.details}`);
+    });
+
+  } else if (video.canPlayType('application/vnd.apple.mpegurl')){
+    addLog('INFO', 'using native HLS');
+    video.src = src;
+    startupTimer = setTimeout(() => {
+      if (video.readyState < 2){
+        showProviderError(provider, `Stream did not start within ${STARTUP_TIMEOUT_MS/1000}s`);
+      }
+    }, STARTUP_TIMEOUT_MS);
+    const onPlaying = () => {
+      clearStartupTimer(); hideOverlay();
+      setStatus('Playing', 'playing');
+      if (rawUrl) saveSticky(anilistId, currentEp, currentType, rawUrl, referer);
+      updateAudioTracks();
+      video.removeEventListener('playing', onPlaying);
+    };
+    video.addEventListener('playing', onPlaying);
+    video.play().catch(()=>{});
+  } else {
+    showProviderError(provider, 'HLS not supported in this browser');
+  }
+}
+
+// ---------------- META ----------------
+async function loadMeta(){
+  try {
+    const info = await fetchJSON(`/anime/info/${anilistId}`, 30000, 'info');
+
+    // Title: try every fallback chain
+    const title = (typeof info.title === 'object' && info.title)
+      ? (info.title.english || info.title.romaji || info.title.native || info.title.userPreferred)
+      : null;
+    const t = title || info.title || `Anime #${anilistId}`;
+
+    $('#title').textContent = t;
+    $('#header-title').textContent = t;
+    document.title = t + ' · Player';
+
+    // Cover: extraLarge → large → medium → banner → placeholder
+    const coverUrl = info.coverImage?.extraLarge
+                  || info.coverImage?.large
+                  || info.coverImage?.medium
+                  || info.bannerImage
+                  || PLACEHOLDER;
+
+    const coverEl = $('#cover');
+    coverEl.classList.add('loading');
+    coverEl.onerror = () => { coverEl.src = PLACEHOLDER; coverEl.classList.remove('loading'); coverEl.classList.add('placeholder'); };
+    coverEl.onload  = () => { coverEl.classList.remove('loading'); };
+    coverEl.src = coverUrl;
+
+    // Video poster (banner preferred)
+    const poster = info.bannerImage || info.coverImage?.extraLarge || info.coverImage?.large || PLACEHOLDER;
+    video.poster = poster;
+
+    // Subtitle line
+    const bits = [];
+    if (info.format) bits.push(info.format);
+    if (info.seasonYear) bits.push(String(info.seasonYear));
+    if (info.episodes) bits.push(`${info.episodes} ep`);
+    if (info.averageScore) bits.push(`${info.averageScore}%`);
+    $('#subtitle').textContent = bits.join(' · ');
+
+    if (info.episodes > 0 && !episodes){
+      fakeEpisodes = Array.from({ length: info.episodes }, (_, i) => ({ number: i + 1 }));
+      renderEpisodes();
+    }
+  } catch(e){
+    addLog('WARN', `meta failed: ${e.message}`);
+    const fallback = `Anime #${anilistId}`;
+    $('#title').textContent = fallback;
+    $('#header-title').textContent = fallback;
+    $('#cover').src = PLACEHOLDER;
+  }
+}
+
+// ---------------- EVENTS ----------------
+epList.addEventListener('click', ev => {
+  const b = ev.target.closest('button[data-ep]');
+  if (!b) return;
+  const n = Number(b.dataset.ep);
+  if (n === currentEp) return;
+  currentEp = n;
+  play();
+});
+
+$('#retry').addEventListener('click', () => {
+  clearExtractCache(anilistId, currentEp, currentType);
+  addLog('WARN', 'manual retry');
+  play(true, { deep: false });
+});
+
+// ---------------- BOOT ----------------
+(async function boot(){
+  if (!anilistId){ showOverlay('Missing ?id= in URL', true); return; }
+  addLog('INFO', `anilistId=${anilistId} ep=${startEp} type=${startType} provider=${currentProvider}`);
+  if (STREAM_URL_OVERRIDE) addLog('INFO', 'STREAM_URL_OVERRIDE active');
+  loadMeta();
+  loadEpisodesBackground();
+  play();
+})();
+</script>
+</body>
+</html>
