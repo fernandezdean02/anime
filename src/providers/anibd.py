@@ -1,4 +1,6 @@
+import asyncio
 import re
+import time
 from urllib.parse import quote, urlparse
 
 from src.providers._http import fetch_json, fetch_text
@@ -8,15 +10,69 @@ from src.providers._media import build_ctx
 NAME = "anibd"
 BASE = "https://epeng.animeapps.top"
 
+# ─── Caches ────────────────────────────────────────────────────────────
+# The /api2.php server list is stable per anilistId (episode catalog).
+# Caching it saves a full round trip per episode request — both
+# get_episodes() and find_episode_link() benefit.
+_SERVERS_CACHE: dict = {}      # anilistId -> (expires_at, list)
+_SERVERS_FUTURES: dict = {}    # anilistId -> in-flight task (dedupe concurrent)
+_SERVERS_TTL = 300.0           # 5 min
+
+_PLAYER_CACHE: dict = {}       # provider_link -> (expires_at, list)
+_PLAYER_FUTURES: dict = {}
+_PLAYER_TTL = 300.0
+
+RESOLVE_TIMEOUT = 6.0          # per-server resolve; fail fast so we don't wait
+
+
+async def _fetch_servers_uncached(anilist_id: int) -> list:
+    data = await fetch_json(f"{BASE}/api2.php?epid={anilist_id}")
+    result = data if isinstance(data, list) else []
+    _SERVERS_CACHE[anilist_id] = (time.time() + _SERVERS_TTL, result)
+    return result
+
 
 async def fetch_servers(anilist_id: int) -> list:
-    data = await fetch_json(f"{BASE}/api2.php?epid={anilist_id}")
-    return data if isinstance(data, list) else []
+    now = time.time()
+    hit = _SERVERS_CACHE.get(anilist_id)
+    if hit and hit[0] > now:
+        return hit[1]
+    # Dedupe concurrent calls: if get_episodes() and watch() race, only
+    # one HTTP request is made and both await the same future.
+    fut = _SERVERS_FUTURES.get(anilist_id)
+    if fut and not fut.done():
+        return await fut
+    task = asyncio.create_task(_fetch_servers_uncached(anilist_id))
+    _SERVERS_FUTURES[anilist_id] = task
+    try:
+        return await task
+    finally:
+        if _SERVERS_FUTURES.get(anilist_id) is task:
+            _SERVERS_FUTURES.pop(anilist_id, None)
+
+
+async def _fetch_player_links_uncached(provider_link: str) -> list:
+    data = await fetch_json(f"{BASE}/apilink.php?data={quote(provider_link, safe="-_.!~*'()")}")
+    result = data if isinstance(data, list) else []
+    _PLAYER_CACHE[provider_link] = (time.time() + _PLAYER_TTL, result)
+    return result
 
 
 async def fetch_player_links(provider_link: str) -> list:
-    data = await fetch_json(f"{BASE}/apilink.php?data={quote(provider_link, safe="-_.!~*'()")}")
-    return data if isinstance(data, list) else []
+    now = time.time()
+    hit = _PLAYER_CACHE.get(provider_link)
+    if hit and hit[0] > now:
+        return hit[1]
+    fut = _PLAYER_FUTURES.get(provider_link)
+    if fut and not fut.done():
+        return await fut
+    task = asyncio.create_task(_fetch_player_links_uncached(provider_link))
+    _PLAYER_FUTURES[provider_link] = task
+    try:
+        return await task
+    finally:
+        if _PLAYER_FUTURES.get(provider_link) is task:
+            _PLAYER_FUTURES.pop(provider_link, None)
 
 
 def extract_video_url(html: str, origin: str) -> str | None:
@@ -29,15 +85,22 @@ def extract_video_url(html: str, origin: str) -> str | None:
     return f"{origin}{'' if raw.startswith('/') else '/'}{raw}"
 
 
-async def resolve_player_stream(player_link: str) -> dict:
-    parts = urlparse(player_link)
-    origin = f"{parts.scheme}://{parts.netloc}"
-    referer = f"{origin}/"
-    html = await fetch_text(player_link, {"Referer": referer})
-    hls = extract_video_url(html, origin)
-    if not hls:
-        raise RuntimeError(f"anibd: no videoUrl found at {player_link}")
-    return {"hls": hls, "referer": referer}
+async def _resolve_one(link: str) -> dict | None:
+    """Resolve a single player link. Returns {hls, referer, link} or None."""
+    try:
+        parts = urlparse(link)
+        origin = f"{parts.scheme}://{parts.netloc}"
+        referer = f"{origin}/"
+        html = await asyncio.wait_for(
+            fetch_text(link, {"Referer": referer}),
+            timeout=RESOLVE_TIMEOUT,
+        )
+        hls = extract_video_url(html, origin)
+        if not hls:
+            return None
+        return {"hls": hls, "referer": referer, "link": link}
+    except Exception:
+        return None
 
 
 def audio_from_server_name(name: str = "") -> str:
@@ -135,35 +198,50 @@ async def watch(anilist_id: int, audio: str, ep: int, ctx: dict | None = None) -
     provider_link = await find_episode_link(anilist_id, audio, ep)
     if not provider_link:
         raise RuntimeError(f"anibd episode {ep} not found")
+
     servers = await fetch_player_links(provider_link)
+    entries = [e for e in servers or [] if isinstance(e, dict) and e.get("link")]
+    if not entries:
+        return []
+
+    # Race ALL player servers in parallel; take the FIRST successful HLS
+    # resolution; cancel the rest. The frontend only ever plays the first
+    # isActive stream, so resolving the others is wasted work.
+    tasks = {
+        asyncio.create_task(_resolve_one(e["link"])): e
+        for e in entries
+    }
     streams = []
-    active_assigned = False
-    for entry in servers or []:
-        entry = entry if isinstance(entry, dict) else {}
-        link = entry.get("link")
-        if not link:
-            continue
-        try:
-            resolved = await resolve_player_stream(link)
-            streams.append({
-                "url": resolved["hls"],
-                "type": "hls",
-                "server": entry.get("server") or "AniBD",
-                "audio": audio,
-                "referer": resolved["referer"],
-                "priority": 4 if active_assigned else 5,
-                "isActive": not active_assigned,
-            })
-            active_assigned = True
-        except Exception:
-            parts = urlparse(link)
-            streams.append({
-                "url": link,
-                "type": "embed",
-                "server": entry.get("server") or "AniBD",
-                "audio": audio,
-                "referer": f"{parts.scheme}://{parts.netloc}/",
-                "priority": 1,
-                "isActive": False,
-            })
+    try:
+        while tasks:
+            done, _pending = await asyncio.wait(
+                tasks.keys(), return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in done:
+                entry = tasks.pop(task)
+                try:
+                    resolved = task.result()
+                except Exception:
+                    resolved = None
+                if resolved:
+                    streams.append({
+                        "url": resolved["hls"],
+                        "type": "hls",
+                        "server": entry.get("server") or "AniBD",
+                        "audio": audio,
+                        "referer": resolved["referer"],
+                        "priority": 5,
+                        "isActive": len(streams) == 0,
+                    })
+            if streams:
+                break   # got one → don't wait for the rest
+    finally:
+        # Cancel any still-running resolves; they'd just be thrown away
+        for t in tasks:
+            t.cancel()
+        for t in tasks:
+            try:
+                await t
+            except BaseException:
+                pass
     return streams
