@@ -1,14 +1,12 @@
-"""Serve the anime API + local UI + stream proxy + VLC launcher.
-Uses curl_cffi (browser TLS impersonation) for CDN bypass when available,
-falls back to httpx when cffi fails (e.g. non-Cloudflare CDNs).
+"""Serve the anime API + local UI + stream proxy.
 
 Run:  python serve.py
 
 Env overrides:
-  EXTRACT_TIMEOUT    default 50
+  EXTRACT_TIMEOUT    provider extract timeout, default 25 (was 50)
+  RACE_TIMEOUT       full race timeout,      default 50
   EPISODES_TIMEOUT   default 90
   INFO_TIMEOUT       default 20
-  FORCE_HTTPX_MP4    set to 1 to stream mp4 via httpx instead of buffering via cffi
 """
 import os
 import re
@@ -29,7 +27,6 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api import app
 
-# ═══════════════ curl_cffi (browser TLS impersonation) ═══════════════
 try:
     from curl_cffi.requests import AsyncSession as CffiAsyncSession
     HAS_CFFI = True
@@ -45,13 +42,9 @@ log.info(f"[startup] BASE_DIR={BASE_DIR} STATIC_DIR={STATIC_DIR} exists={os.path
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
 
-
-# ═══════════════ shared httpx client (fallback) ═══════════════
 _shared_client: httpx.AsyncClient | None = None
 
 def get_http() -> httpx.AsyncClient:
@@ -59,18 +52,11 @@ def get_http() -> httpx.AsyncClient:
     if _shared_client is None or _shared_client.is_closed:
         _shared_client = httpx.AsyncClient(
             timeout=httpx.Timeout(connect=8.0, read=30.0, write=10.0, pool=5.0),
-            follow_redirects=True,
-            http2=True,
-            limits=httpx.Limits(
-                max_connections=100,
-                max_keepalive_connections=20,
-                keepalive_expiry=15.0,
-            ),
+            follow_redirects=True, http2=True,
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20, keepalive_expiry=15.0),
         )
     return _shared_client
 
-
-# ═══════════════ curl_cffi session ═══════════════
 _cffi_session: "CffiAsyncSession | None" = None
 _cffi_lock = asyncio.Lock()
 
@@ -84,22 +70,22 @@ async def get_cffi():
                 _cffi_session = CffiAsyncSession(max_clients=20)
     return _cffi_session
 
-
-# ═══════════════ per-endpoint hard timeouts ═══════════════
 TIMEOUTS = {
-    "/anime/extract":  float(os.environ.get("EXTRACT_TIMEOUT",  "50")),
+    "/anime/extract":  float(os.environ.get("EXTRACT_TIMEOUT",  "25")),
     "/anime/episodes": float(os.environ.get("EPISODES_TIMEOUT", "90")),
     "/anime/info":     float(os.environ.get("INFO_TIMEOUT",     "20")),
 }
 
-def _timeout_for(path: str) -> "float | None":
+def _timeout_for(path: str, qp: dict = None) -> "float | None":
+    qp = qp or {}
+    # Race (no provider param) gets RACE_TIMEOUT; single provider gets EXTRACT_TIMEOUT
+    if path.startswith("/anime/extract") and "provider" not in qp:
+        return float(os.environ.get("RACE_TIMEOUT", "50"))
     for prefix, t in TIMEOUTS.items():
         if path.startswith(prefix):
             return t
     return None
 
-
-# ═══════════════ persistent disk cache ═══════════════
 CACHE_DIR = os.path.join(BASE_DIR, ".cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
@@ -161,8 +147,6 @@ def _cache_set(key, body, ct, status, ttl):
     except Exception as e:
         log.warning(f"cache write failed: {e}")
 
-
-# ═══════════════ periodic client reset ═══════════════
 _last_reset = [time.time()]
 
 @app.middleware("http")
@@ -183,8 +167,6 @@ async def reset_http_periodically(request: Request, call_next):
             except: pass
     return await call_next(request)
 
-
-# ═══════════════ middleware: timeout + cache + tagged log ═══════════════
 @app.middleware("http")
 async def cache_and_log(request: Request, call_next):
     path = request.url.path
@@ -207,7 +189,7 @@ async def cache_and_log(request: Request, call_next):
         return resp
 
     bypass = "nocache=1" in request.url.query
-    timeout = None if "deep" in qp else _timeout_for(path)
+    timeout = None if "deep" in qp else _timeout_for(path, qp)
 
     if not bypass:
         key = f"{path}?{request.url.query}"
@@ -219,11 +201,6 @@ async def cache_and_log(request: Request, call_next):
                 if isinstance(data, dict):
                     if data.get("provider"):
                         cached_prov = f" [cached from {data['provider']}]"
-                    elif isinstance(data.get("streams"), list):
-                        ps = [s.get("provider") for s in data["streams"]
-                              if isinstance(s, dict) and s.get("provider")]
-                        if ps:
-                            cached_prov = f" [cached from {','.join(ps[:3])}]"
             except Exception:
                 pass
             log.info(f"{0:7.0f}ms  {hit['st']}  {path}{tag}{cached_prov}  [CACHE HIT]")
@@ -284,39 +261,33 @@ async def cache_and_log(request: Request, call_next):
     return resp
 
 
-# ═══════════════ stream proxy helpers ═══════════════
 UA = ("Mozilla/5.0 (Linux; Android 13; SM-G991B) "
       "AppleWebKit/537.36 (KHTML, like Gecko) "
       "Chrome/131.0.0.0 Mobile Safari/537.36")
-
-FORCE_HTTPX_MP4 = os.environ.get("FORCE_HTTPX_MP4", "0") == "1"
-
 
 def _origin(referer: str) -> str:
     p = referer.split("/", 3)
     return f"{p[0]}//{p[2]}" if len(p) >= 3 else referer
 
-
 def _is_m3u8_url(u: str) -> bool:
     path = u.split("?", 1)[0].lower()
     return path.endswith(".m3u8") or "m3u8" in path
-
 
 def _is_mp4_url(u: str) -> bool:
     path = u.split("?", 1)[0].lower()
     return path.endswith(".mp4") or path.endswith(".m4v")
 
+def _is_media_segment(u: str) -> bool:
+    path = u.split("?", 1)[0].lower()
+    return any(path.endswith(ext) for ext in (".ts", ".m4s", ".m4f", ".m4v", ".mp4", ".aac", ".webm"))
 
 def _looks_like_mp4(data: bytes) -> bool:
     if len(data) < 12: return False
-    return data[4:8] in (b'ftyp', b'moov', b'mdat', b'free',
-                         b'skip', b'wide', b'styp')
-
+    return data[4:8] in (b'ftyp', b'moov', b'mdat', b'free', b'skip', b'wide', b'styp')
 
 def _is_ass_url(u: str) -> bool:
     path = u.split("?", 1)[0].lower()
     return path.endswith(".ass") or path.endswith(".ssa")
-
 
 def _ass_to_vtt(ass_text: str) -> str:
     raw = ass_text.replace("\r\n", "\n").replace("\r", "\n")
@@ -360,8 +331,6 @@ def _ass_to_vtt(ass_text: str) -> str:
         out.append(f"{start} --> {end}"); out.append(text); out.append("")
     return "\n".join(out)
 
-
-# ═══════════════ browser-fingerprint headers ═══════════════
 def _build_cdn_headers(referer, range_hdr=None):
     h = {
         "User-Agent": UA,
@@ -382,25 +351,19 @@ def _build_cdn_headers(referer, range_hdr=None):
         h["Range"] = range_hdr
     return h
 
-
 def _is_good_media_resp(resp) -> bool:
     if resp is None or resp.status_code >= 400:
         return False
     ct = (resp.headers.get("content-type") or "").lower()
-    return (
-        ct.startswith("video/")
-        or ct.startswith("audio/")
-        or ct.startswith("application/octet-stream")
-        or ct.startswith("application/vnd.apple.mpegurl")
-        or ct.startswith("application/x-mpegurl")
-        or "mpegurl" in ct
-    )
-
+    return (ct.startswith("video/") or ct.startswith("audio/")
+            or ct.startswith("application/octet-stream")
+            or ct.startswith("application/vnd.apple.mpegurl")
+            or ct.startswith("application/x-mpegurl")
+            or "mpegurl" in ct)
 
 CFFI_STRATEGIES = ["chrome131", "chrome120", "safari17_0", "chrome124"]
 
-
-async def _fetch_media_cffi(url, referer, range_hdr=None, overall_timeout=20.0):
+async def _fetch_media_cffi(url, referer, range_hdr=None, overall_timeout=12.0):
     """Concurrent cffi fetch. First successful strategy wins."""
     session = await get_cffi()
     if session is None:
@@ -408,25 +371,17 @@ async def _fetch_media_cffi(url, referer, range_hdr=None, overall_timeout=20.0):
 
     async def try_strategy(imp):
         try:
-            r = await session.get(
-                url,
-                headers=_build_cdn_headers(referer, range_hdr),
-                impersonate=imp,
-                timeout=15,
-                allow_redirects=True,
-            )
+            r = await session.get(url, headers=_build_cdn_headers(referer, range_hdr),
+                                  impersonate=imp, timeout=15, allow_redirects=True)
             if _is_good_media_resp(r):
                 hdrs = {}
-                for h in ("content-length", "content-range",
-                          "accept-ranges", "cache-control"):
+                for h in ("content-length", "content-range", "accept-ranges", "cache-control"):
                     v = r.headers.get(h)
                     if v: hdrs[h] = v
-                return (r.content,
-                        r.headers.get("content-type", "application/vnd.apple.mpegurl"),
+                return (r.content, r.headers.get("content-type", "application/vnd.apple.mpegurl"),
                         r.status_code, imp, hdrs)
             ct = (r.headers.get("content-type") or "")[:40]
-            snip = (r.content[:120].decode("utf-8", "replace").replace("\n", " ")
-                    if r.content else "")
+            snip = (r.content[:120].decode("utf-8", "replace").replace("\n", " ") if r.content else "")
             log.info(f"[cffi] {imp} → {r.status_code} ct={ct!r} body={snip!r}")
         except Exception as e:
             log.info(f"[cffi] {imp} err: {e}")
@@ -441,27 +396,20 @@ async def _fetch_media_cffi(url, referer, range_hdr=None, overall_timeout=20.0):
             remaining = deadline - loop.time()
             if remaining <= 0:
                 break
-            done, pending = await asyncio.wait(
-                pending, timeout=remaining, return_when=asyncio.FIRST_COMPLETED)
+            done, pending = await asyncio.wait(pending, timeout=remaining, return_when=asyncio.FIRST_COMPLETED)
             if not done:
                 break
             for t in done:
-                try:
-                    r = t.result()
-                except Exception:
-                    r = None
-                if r is not None:
-                    return r
+                try: r = t.result()
+                except Exception: r = None
+                if r is not None: return r
     finally:
         for t in tasks:
-            if not t.done():
-                t.cancel()
+            if not t.done(): t.cancel()
         for t in tasks:
             try: await t
             except BaseException: pass
-
     return None, None, 0, "all strategies failed", {}
-
 
 async def _fetch_small(url: str, referer: "str | None"):
     headers = {"User-Agent": UA, "Accept": "*/*"}
@@ -469,7 +417,6 @@ async def _fetch_small(url: str, referer: "str | None"):
         headers["Referer"] = referer
         headers["Origin"] = _origin(referer)
     return await get_http().get(url, headers=headers)
-
 
 def _rewrite_m3u8(text: str, base: str, referer: "str | None",
                   request_base: "str | None" = None) -> str:
@@ -494,24 +441,18 @@ def _rewrite_m3u8(text: str, base: str, referer: "str | None",
         out.append(wrap(s))
     return "\n".join(out)
 
-
-# ═══════════════ /p/m3u8 ═══════════════
 @app.get("/p/m3u8")
-async def proxy_m3u8(request: Request, url: str,
-                     referer: "str | None" = None,
+async def proxy_m3u8(request: Request, url: str, referer: "str | None" = None,
                      direct: int = 0, abs: int = 0):
     if direct:
-        log.info("/p/m3u8 DIRECT redirect")
         return RedirectResponse(url=url, status_code=302)
-
     request_base = str(request.base_url).rstrip("/") if abs else None
 
     if HAS_CFFI:
-        body, ct, status, label, _hdrs = await _fetch_media_cffi(url, referer)
+        body, ct, status, label, _hdrs = await _fetch_media_cffi(url, referer, overall_timeout=12.0)
         if body is not None:
             return Response(
-                content=_rewrite_m3u8(body.decode("utf-8", "replace"),
-                                      url, referer, request_base),
+                content=_rewrite_m3u8(body.decode("utf-8", "replace"), url, referer, request_base),
                 media_type="application/vnd.apple.mpegurl",
             )
         log.warning(f"/p/m3u8 cffi failed ({label}), trying httpx")
@@ -519,22 +460,17 @@ async def proxy_m3u8(request: Request, url: str,
     try:
         r = await _fetch_small(url, referer)
     except Exception as e:
-        return Response(content=f"upstream error: {e}".encode(),
-                        status_code=502, media_type="text/plain")
+        return Response(content=f"upstream error: {e}".encode(), status_code=502, media_type="text/plain")
     if r.status_code != 200:
         return Response(content=r.content, status_code=r.status_code,
                         media_type=r.headers.get("content-type", "text/plain"))
     return Response(content=_rewrite_m3u8(r.text, url, referer, request_base),
                     media_type="application/vnd.apple.mpegurl")
 
-
-# ═══════════════ /p/seg ═══════════════
 @app.get("/p/seg")
-async def proxy_seg(request: Request, url: str,
-                    referer: "str | None" = None,
+async def proxy_seg(request: Request, url: str, referer: "str | None" = None,
                     direct: int = 0, abs: int = 0):
     if direct:
-        log.info("/p/seg DIRECT redirect")
         return RedirectResponse(url=url, status_code=302)
 
     if _is_m3u8_url(url):
@@ -544,8 +480,7 @@ async def proxy_seg(request: Request, url: str,
         try:
             r = await _fetch_small(url, referer)
         except Exception as e:
-            return Response(content=f"upstream error: {e}".encode(),
-                            status_code=502, media_type="text/plain")
+            return Response(content=f"upstream error: {e}".encode(), status_code=502, media_type="text/plain")
         if r.status_code != 200:
             return Response(content=r.content, status_code=r.status_code,
                             media_type=r.headers.get("content-type", "text/plain"))
@@ -554,8 +489,7 @@ async def proxy_seg(request: Request, url: str,
         except UnicodeDecodeError:
             text = r.content.decode("cp1252", errors="replace")
         if not text.strip() or text.lstrip().startswith("<"):
-            return Response(content=r.content, status_code=200,
-                            media_type="text/plain; charset=utf-8")
+            return Response(content=r.content, status_code=200, media_type="text/plain; charset=utf-8")
         try:
             vtt = _ass_to_vtt(text)
             cues = max(0, vtt.count("-->"))
@@ -565,22 +499,63 @@ async def proxy_seg(request: Request, url: str,
                             headers={"Cache-Control": "public, max-age=3600"})
         except Exception as e:
             log.warning(f"ass→vtt failed: {e}")
-            return Response(content=r.content, status_code=200,
-                            media_type="text/plain; charset=utf-8")
+            return Response(content=r.content, status_code=200, media_type="text/plain; charset=utf-8")
 
     range_hdr = request.headers.get("range")
     is_mp4 = _is_mp4_url(url)
-    use_cffi = HAS_CFFI and not (FORCE_HTTPX_MP4 and is_mp4)
 
-    if use_cffi:
-        body, ct, status, label, hdrs = await _fetch_media_cffi(url, referer, range_hdr)
+    # ═══════════ FAST PATH: httpx streaming for media segments ═══════════
+    # Skips the cffi buffer-then-return for segments; streams bytes directly.
+    # Falls back to cffi if the CDN returns a challenge or non-media response.
+    if _is_media_segment(url) or is_mp4:
+        try:
+            fh = {"User-Agent": UA, "Accept": "*/*"}
+            if referer:
+                fh["Referer"] = referer
+                fh["Origin"] = _origin(referer)
+            if range_hdr:
+                fh["Range"] = range_hdr
+
+            client = get_http()
+            req = client.build_request("GET", url, headers=fh)
+            upstream = await client.send(req, stream=True)
+            ct = (upstream.headers.get("content-type") or "").lower()
+            st = upstream.status_code
+
+            playable = st < 400 and (
+                "video" in ct or "audio" in ct or "octet-stream" in ct
+                or "mp2t" in ct or "mpeg" in ct or "mp4" in ct
+            )
+
+            if playable:
+                out_headers = {}
+                for h in ("content-type", "content-length", "content-range",
+                          "accept-ranges", "cache-control"):
+                    v = upstream.headers.get(h)
+                    if v: out_headers[h.title()] = v
+
+                async def fast_body():
+                    try:
+                        async for chunk in upstream.aiter_raw(chunk_size=65536):
+                            yield chunk
+                    finally:
+                        await upstream.aclose()
+
+                return StreamingResponse(fast_body(), status_code=st, headers=out_headers)
+
+            # Not playable — close and fall through to cffi
+            await upstream.aclose()
+            log.info(f"/p/seg fast failed (status={st}, ct={ct[:40]}), trying cffi")
+        except Exception as e:
+            log.info(f"/p/seg fast exception: {e}, trying cffi")
+
+    # ═══════════ cffi fallback (buffered) ═══════════
+    if HAS_CFFI:
+        body, ct, status, label, hdrs = await _fetch_media_cffi(url, referer, range_hdr, overall_timeout=15.0)
         if body is not None:
             if is_mp4 and not range_hdr and not _looks_like_mp4(body[:16384]):
                 log.warning(f"non-MP4 at .mp4 URL via cffi: {url[:100]}")
-                return Response(content=b"upstream returned non-MP4",
-                                status_code=502, media_type="text/plain")
-            if is_mp4 and len(body) > 100 * 1024 * 1024:
-                log.warning(f"/p/seg buffered {len(body)//(1024*1024)}MB via cffi for {url[:80]}")
+                return Response(content=b"upstream returned non-MP4", status_code=502, media_type="text/plain")
             out_hdrs = {"Accept-Ranges": "bytes", "Cache-Control": "public, max-age=300"}
             for h in ("content-length", "content-range"):
                 if h in hdrs:
@@ -590,6 +565,7 @@ async def proxy_seg(request: Request, url: str,
                             headers=out_hdrs)
         log.warning(f"/p/seg cffi failed ({label}), trying httpx")
 
+    # ═══════════ Last-resort httpx (buffered, full logic) ═══════════
     fwd_headers = {"User-Agent": UA, "Accept": "*/*"}
     if referer:
         fwd_headers["Referer"] = referer
@@ -602,8 +578,7 @@ async def proxy_seg(request: Request, url: str,
         req = client.build_request("GET", url, headers=fwd_headers)
         upstream = await client.send(req, stream=True)
     except Exception as e:
-        return Response(content=f"upstream error: {e}".encode(),
-                        status_code=502, media_type="text/plain")
+        return Response(content=f"upstream error: {e}".encode(), status_code=502, media_type="text/plain")
 
     ct = (upstream.headers.get("content-type") or "").lower()
 
@@ -617,8 +592,7 @@ async def proxy_seg(request: Request, url: str,
     if "text/html" in ct:
         await upstream.aclose()
         log.warning(f"HTML returned for media: {url[:100]}")
-        return Response(content=b"upstream returned HTML",
-                        status_code=502, media_type="text/plain")
+        return Response(content=b"upstream returned HTML", status_code=502, media_type="text/plain")
 
     if is_mp4 and not range_hdr:
         head_chunks = []
@@ -630,13 +604,10 @@ async def proxy_seg(request: Request, url: str,
         head = b"".join(head_chunks)
         if not _looks_like_mp4(head):
             await upstream.aclose()
-            log.warning(f"non-MP4 at .mp4 URL: {url[:100]}")
-            return Response(content=b"upstream returned non-MP4",
-                            status_code=502, media_type="text/plain")
+            return Response(content=b"upstream returned non-MP4", status_code=502, media_type="text/plain")
 
         out_headers = {}
-        for h in ("content-type", "content-length", "content-range",
-                  "accept-ranges", "cache-control"):
+        for h in ("content-type", "content-length", "content-range", "accept-ranges", "cache-control"):
             v = upstream.headers.get(h)
             if v: out_headers[h.title()] = v
 
@@ -648,12 +619,10 @@ async def proxy_seg(request: Request, url: str,
             finally:
                 await upstream.aclose()
 
-        return StreamingResponse(mp4_body(), status_code=upstream.status_code,
-                                 headers=out_headers)
+        return StreamingResponse(mp4_body(), status_code=upstream.status_code, headers=out_headers)
 
     out_headers = {}
-    for h in ("content-type", "content-length", "content-range",
-              "accept-ranges", "cache-control"):
+    for h in ("content-type", "content-length", "content-range", "accept-ranges", "cache-control"):
         v = upstream.headers.get(h)
         if v: out_headers[h.title()] = v
 
@@ -664,87 +633,34 @@ async def proxy_seg(request: Request, url: str,
         finally:
             await upstream.aclose()
 
-    return StreamingResponse(body(), status_code=upstream.status_code,
-                             headers=out_headers)
+    return StreamingResponse(body(), status_code=upstream.status_code, headers=out_headers)
 
 
-# ═══════════════ VLC launcher ═══════════════
+# ═══════════════ VLC launcher (kept for backwards compat, harmless) ═══════════════
 def _launch_vlc(url: str, mime: str) -> "tuple[bool, str]":
-    """Try multiple Android intent launch strategies.
-    Returns (success, error_message)."""
-    attempts = []
-    errors = []
-
-    # 1. termux-am / am (uses Termux socket server)
-    for am_name in ("termux-am", "am"):
-        am_path = shutil.which(am_name)
-        if am_path:
-            for extra in (["-p", "org.videolan.vlc"], []):
-                attempts.append((am_name, [
-                    am_path, "start",
-                    "-a", "android.intent.action.VIEW",
-                    "-d", url, "-t", mime
-                ] + extra))
-            break
-
-    # 2. /system/bin/am direct (bypasses Termux socket — works on some Android versions)
-    for sys_am in ("/system/bin/am", "/system/bin/cmd"):
-        if os.path.exists(sys_am):
-            attempts.append((sys_am, [
-                sys_am, "start",
-                "-a", "android.intent.action.VIEW",
-                "-d", url, "-t", mime
-            ]))
-
-    # 3. termux-open (different wrapper, same socket under the hood)
-    to_path = shutil.which("termux-open")
-    if to_path:
-        attempts.append(("termux-open", [to_path, "--content-type", mime, url]))
-
-    # 4. termux-open-url (last resort)
-    tou_path = shutil.which("termux-open-url")
-    if tou_path:
-        attempts.append(("termux-open-url", [tou_path, url]))
-
-    for name, cmd in attempts:
+    am = shutil.which("termux-am") or shutil.which("am")
+    if not am:
+        return False, "termux-am / am not found — pkg install termux-am"
+    last_err = ""
+    for extra in (["-p", "org.videolan.vlc"], []):
         try:
-            r = subprocess.run(cmd, capture_output=True, timeout=8)
-            stderr = (r.stderr or b"").decode("utf-8", "replace").strip()
-            stdout = (r.stdout or b"").decode("utf-8", "replace").strip()
-            if r.returncode == 0 and not (stderr and "socket" in stderr.lower()):
-                log.info(f"[vlc-launch] {name} succeeded")
+            r = subprocess.run([am, "start", "-a", "android.intent.action.VIEW",
+                                "-d", url, "-t", mime] + extra,
+                               capture_output=True, timeout=8)
+            if r.returncode == 0 and not (r.stderr or b"").strip():
                 return True, ""
-            errors.append(f"{name}: rc={r.returncode} {stderr or stdout or '(no output)'}"[:200])
-        except subprocess.TimeoutExpired:
-            errors.append(f"{name}: timeout")
+            last_err = (r.stderr or r.stdout or b"").decode("utf-8", "replace").strip()
         except Exception as e:
-            errors.append(f"{name}: {str(e)[:100]}")
-
-    full_err = " | ".join(errors) if errors else "no launch methods available"
-    log.warning(f"[vlc-launch] all failed: {full_err}")
-
-    if "socket" in full_err.lower() or "No such file" in full_err:
-        return False, (
-            "Cannot launch VLC from this Termux build: the am socket server is disabled "
-            "(common on F-Droid Termux). The URL has been copied to your clipboard — "
-            "open VLC → Menu → New stream → paste. "
-            "To fix the button permanently, install Termux from GitHub releases."
-        )
-    return False, full_err
+            last_err = str(e)
+    if "Could not connect to socket" in last_err or "No such file" in last_err:
+        return False, "Termux am socket server is disabled in this build."
+    return False, last_err or "launch failed"
 
 @app.get("/open")
-async def open_vlc(request: Request, url: str,
-                   referer: str = "", kind: str = "hls",
-                   mode: str = "raw"):
-    """Open a stream in VLC.
-
-    mode=raw   → pass the CDN URL straight to VLC (works when CDN doesn't need Referer)
-    mode=proxy → route through local proxy (needed when CDN requires Referer)
-    """
+async def open_vlc(request: Request, url: str, referer: str = "", kind: str = "hls", mode: str = "raw"):
     client = request.client.host if request.client else ""
     if client not in ("127.0.0.1", "::1", "localhost"):
         return Response(content=b"local only", status_code=403)
-
     if mode == "raw":
         target = url
         mime = "video/mp4" if (kind == "mp4" or _is_mp4_url(url)) else "application/x-mpegURL"
@@ -758,16 +674,13 @@ async def open_vlc(request: Request, url: str,
             target = f"{base}/p/m3u8?url={quote(url, safe='')}&abs=1"
         if referer:
             target += f"&referer={quote(referer, safe='')}"
-
     ok, err = _launch_vlc(target, mime)
     log.info(f"VLC open [{mode}] {mime}: {target[:120]} → {'ok' if ok else err}")
     if not ok:
-        return Response(content=f"launch failed: {err}".encode(),
-                        status_code=500, media_type="text/plain")
+        return Response(content=f"launch failed: {err}".encode(), status_code=500, media_type="text/plain")
     return {"ok": True, "target": target, "mime": mime, "mode": mode}
 
 
-# ═══════════════ server-side recent-URL history ═══════════════
 RECENT_FILE = os.path.join(CACHE_DIR, "_recent.json")
 RECENT_MAX = 50
 _recent_lock = asyncio.Lock()
@@ -801,15 +714,9 @@ async def recent_add(request: Request):
     url = data.get("url", "")
     if not url:
         return Response(status_code=400, content=b"url required")
-    entry = {
-        "url": url,
-        "referer": data.get("referer", ""),
-        "provider": data.get("provider", ""),
-        "animeId": data.get("animeId"),
-        "ep": data.get("ep"),
-        "kind": data.get("kind", "hls"),
-        "ts": int(time.time()),
-    }
+    entry = {"url": url, "referer": data.get("referer", ""), "provider": data.get("provider", ""),
+             "animeId": data.get("animeId"), "ep": data.get("ep"),
+             "kind": data.get("kind", "hls"), "ts": int(time.time())}
     async with _recent_lock:
         items = [e for e in _recent_load() if e.get("url") != url]
         items.insert(0, entry)
@@ -822,8 +729,6 @@ async def recent_clear():
         _recent_save([])
     return {"ok": True}
 
-
-# ═══════════════ health ═══════════════
 @app.get("/health")
 async def health():
     n_cache = 0
@@ -832,25 +737,18 @@ async def health():
     except Exception:
         pass
     return {
-        "ok": True,
-        "cffi": HAS_CFFI,
-        "strategies": CFFI_STRATEGIES,
-        "timeouts": TIMEOUTS,
-        "cache_entries": n_cache,
-        "recent_entries": len(_recent_load()),
-        "force_httpx_mp4": FORCE_HTTPX_MP4,
-        "base_dir": BASE_DIR,
-        "static_dir": STATIC_DIR,
+        "ok": True, "cffi": HAS_CFFI, "strategies": CFFI_STRATEGIES,
+        "timeouts": TIMEOUTS, "race_timeout": float(os.environ.get("RACE_TIMEOUT", "50")),
+        "cache_entries": n_cache, "recent_entries": len(_recent_load()),
+        "base_dir": BASE_DIR, "static_dir": STATIC_DIR,
         "static_exists": os.path.isdir(STATIC_DIR),
+        "fast_segments": True,
     }
 
-
-# ═══════════════ static mount + root override ═══════════════
 if not os.path.isdir(STATIC_DIR):
-    log.error(f"[startup] STATIC_DIR missing: {STATIC_DIR} — static mount will fail")
+    log.error(f"[startup] STATIC_DIR missing: {STATIC_DIR}")
 app.mount("/ui", StaticFiles(directory=STATIC_DIR, html=True), name="static")
 
-# Remove any existing (Kuhi API) route for "/" so ours wins
 app.router.routes = [r for r in app.routes if getattr(r, "path", None) != "/"]
 
 @app.get("/")
@@ -860,7 +758,6 @@ def _root_redirect():
 @app.get("/player")
 def _player_shortcut():
     return RedirectResponse(url="/ui/player.html", status_code=302)
-
 
 if __name__ == "__main__":
     import uvicorn
