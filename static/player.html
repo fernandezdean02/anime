@@ -79,21 +79,6 @@
         </div>
       </div>
 
-      <div class="card" id="vlc-section">
-        <h3>External Player</h3>
-        <input type="url" id="vlc-url-input" class="vlc-url-input"
-               placeholder="Stream URL (auto-fills or paste manually)" autocomplete="off" spellcheck="false">
-        <div class="vlc-mode" id="vlc-mode">
-          <label><input type="radio" name="vlc-mode" value="raw" checked> <span>Raw CDN</span></label>
-          <label><input type="radio" name="vlc-mode" value="proxy"> <span>Proxied</span></label>
-        </div>
-        <div class="vlc-row">
-          <button id="vlc-copy" class="btn-ghost">Copy link</button>
-          <button id="vlc-open" class="btn-accent">▶ Open in VLC</button>
-        </div>
-        <div id="vlc-hint" class="hint" style="margin-top:8px">No stream yet</div>
-      </div>
-
       <div class="card episodes-card" id="episodes-card">
         <h3 class="episodes-header" id="episodes-header" role="button" tabindex="0" aria-expanded="false" aria-controls="ep-list">
           <span class="ep-title">Episodes</span>
@@ -370,7 +355,6 @@ header .brand {
 .track-select:disabled { opacity: 0.55; cursor: not-allowed; }
 .track-select option { background: #14141c; color: var(--text); padding: 8px; }
 
-/* Sliders */
 .slider-row {
   display: grid;
   grid-template-columns: 82px 1fr 48px;
@@ -425,83 +409,20 @@ header .brand {
   font-variant-numeric: tabular-nums;
 }
 
-/* VLC */
-.vlc-url-input {
-  width: 100%;
-  padding: 9px 11px;
-  background: rgba(0, 0, 0, 0.4);
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: 9px;
-  color: var(--text);
-  font-size: 11px;
-  font-family: ui-monospace, Monaco, Consolas, monospace;
-  margin-bottom: 10px;
-  outline: none;
-  box-sizing: border-box;
-}
-.vlc-url-input:focus { border-color: var(--accent, #7c5cff); box-shadow: 0 0 0 3px rgba(124, 92, 255, 0.12); }
-.vlc-url-input::placeholder { color: var(--muted); }
-
-.vlc-mode {
-  display: flex; gap: 6px;
-  margin-bottom: 10px;
-  background: rgba(0, 0, 0, 0.28);
-  border-radius: 8px;
-  padding: 3px;
-}
-.vlc-mode label {
-  flex: 1;
-  display: flex; align-items: center; justify-content: center; gap: 6px;
-  padding: 7px 10px;
-  border-radius: 6px;
-  font-size: 11px; font-weight: 600;
-  color: var(--muted);
-  cursor: pointer;
-  transition: all .15s;
-}
-.vlc-mode label:has(input:checked) {
-  background: rgba(124, 92, 255, 0.15);
-  color: var(--accent2, #a78bfa);
-}
-.vlc-mode input { display: none; }
-
-.vlc-row { display: flex; gap: 8px; }
-.btn-ghost, .btn-accent {
-  flex: 1;
-  padding: 10px 12px;
-  border-radius: 9px;
-  font-size: 12px; font-weight: 700;
-  cursor: pointer;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  transition: all .15s;
-}
-.btn-ghost { background: rgba(255, 255, 255, 0.04); color: var(--text); }
-.btn-ghost:hover:not(:disabled) { background: rgba(255, 255, 255, 0.08); }
-.btn-accent {
-  background: linear-gradient(135deg, var(--accent, #7c5cff), var(--accent2, #a78bfa));
-  color: white;
-  border-color: transparent;
-  box-shadow: 0 3px 10px var(--glow);
-}
-.btn-accent:hover:not(:disabled) {
-  transform: translateY(-1px);
-  box-shadow: 0 5px 16px var(--glow);
-}
-.btn-ghost:disabled, .btn-accent:disabled { opacity: 0.5; cursor: not-allowed; }
-
-/* Episodes — expandable dropdown-style card, 5-column grid */
+/* ═══════ EPISODES — much bigger now that VLC is gone ═══════ */
 .episodes-card {
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
-  max-height: 420px;
+  max-height: min(560px, 58vh);
   transition: max-height 0.32s cubic-bezier(0.22, 0.61, 0.36, 1);
   overflow: hidden;
 }
-.episodes-card.expanded { max-height: 78vh; }
+.episodes-card.expanded {
+  max-height: 82vh;
+}
 
-/* Clickable header — beats .card h3 specificity via .episodes-card h3.episodes-header */
 .episodes-card h3.episodes-header {
   display: flex;
   align-items: center;
@@ -557,7 +478,6 @@ header .brand {
   color: var(--accent2, #a78bfa);
 }
 
-/* 5-column grid */
 .ep-list {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -823,7 +743,6 @@ let busy = false;
 let overlayTimer = null;
 let currentSubs = [];
 let currentSubsReferer = null;
-let currentStream = { url: '', referer: '', kind: 'hls', provider: '' };
 let currentCaptionTrack = -1;
 
 // Audio graph for volume boost
@@ -903,7 +822,6 @@ const volumeValue  = document.getElementById('volume-value');
 const brightnessSlider = document.getElementById('brightness-slider');
 const brightnessValue  = document.getElementById('brightness-value');
 
-// Restore saved values
 try {
   const savedVol = parseInt(localStorage.getItem('player-volume') || '100', 10);
   if (Number.isFinite(savedVol) && savedVol >= 0 && savedVol <= 300){
@@ -932,7 +850,6 @@ brightnessSlider.addEventListener('input', (e) => {
   applyBrightness(b);
 });
 
-// Resume audio ctx on first user gesture
 document.addEventListener('click', () => {
   if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume().catch(()=>{});
 }, { once: false });
@@ -967,7 +884,7 @@ function updateAudioTracks(){
   if (!select) return;
   const tracks = (hls && Array.isArray(hls.audioTracks)) ? hls.audioTracks : [];
   if (!tracks.length){
-    if (currentStream && currentStream.url){
+    if (video.src || video.currentSrc){
       select.innerHTML = '<option value="0">Original</option>';
       select.value = '0';
       select.disabled = true;
@@ -1138,119 +1055,6 @@ function setEpisodesExpanded(expanded){
   });
 })();
 // ---------------- END EPISODES TOGGLE ----------------
-
-// ---------------- VLC ----------------
-function vlcUrlInputEl(){ return document.getElementById('vlc-url-input'); }
-function vlcMode(){
-  const el = document.querySelector('input[name="vlc-mode"]:checked');
-  return el ? el.value : 'raw';
-}
-function vlcRawUrl(){ return currentStream.url || null; }
-function vlcProxyUrl(){
-  if (!currentStream.url) return null;
-  const u = encodeURIComponent(currentStream.url);
-  const r = currentStream.referer ? `&referer=${encodeURIComponent(currentStream.referer)}` : '';
-  if (currentStream.kind === 'mp4') return `${location.origin}/p/seg?url=${u}${r}`;
-  return `${location.origin}/p/m3u8?url=${u}${r}&abs=1`;
-}
-function vlcUrl(){ return vlcMode() === 'proxy' ? vlcProxyUrl() : vlcRawUrl(); }
-function updateVlcHint(){
-  const hint = document.getElementById('vlc-hint');
-  if (!hint) return;
-  if (!currentStream.url){ hint.textContent = 'No stream yet — extracting or paste URL manually'; return; }
-  const mode = vlcMode();
-  const parts = [mode === 'proxy' ? 'Proxied' : 'Raw', String(currentStream.kind || 'hls').toUpperCase()];
-  if (currentStream.provider) parts.push(currentStream.provider);
-  hint.textContent = parts.join(' · ');
-}
-function setVlcStream(url, referer, kind, provider){
-  currentStream = { url: url || '', referer: referer || '', kind: kind || 'hls', provider: provider || '' };
-  const inp = vlcUrlInputEl();
-  if (inp) inp.value = currentStream.url;
-  updateVlcHint();
-}
-function clearVlcStream(){
-  currentStream = { url: '', referer: '', kind: 'hls', provider: '' };
-  const inp = vlcUrlInputEl();
-  if (inp) inp.value = '';
-  updateVlcHint();
-}
-(function bindVlcInput(){
-  const inp = vlcUrlInputEl();
-  if (!inp) return;
-  inp.addEventListener('input', e => {
-    const v = e.target.value.trim();
-    currentStream.url = v;
-    if (/\.mp4(\?|$)/i.test(v)) currentStream.kind = 'mp4';
-    else if (/\.m3u8(\?|$)/i.test(v)) currentStream.kind = 'hls';
-    updateVlcHint();
-  });
-})();
-
-async function copyToClipboard(text){
-  try { if (navigator.clipboard) { await navigator.clipboard.writeText(text); return true; } } catch {}
-  try {
-    const ta = document.createElement('textarea');
-    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
-    document.body.appendChild(ta); ta.select();
-    const ok = document.execCommand('copy');
-    ta.remove();
-    return ok;
-  } catch { return false; }
-}
-
-async function copyVlcLink(){
-  const link = vlcUrl();
-  if (!link){ addLog('WARN', 'no VLC link'); return; }
-  const btn = document.getElementById('vlc-copy');
-  const ok = await copyToClipboard(link);
-  if (ok){
-    addLog('OK', `copied [${vlcMode()}] ${link.length} chars`);
-    btn.textContent = 'Copied!';
-    setTimeout(() => btn.textContent = 'Copy link', 1400);
-  } else {
-    window.prompt('Copy this URL and paste in VLC → New stream:', link);
-  }
-}
-
-async function openInVlc(){
-  if (!currentStream.url){
-    window.alert('No stream URL yet. Wait for extract, or paste a URL into the field above.');
-    return;
-  }
-  const mode = vlcMode();
-  const btn = document.getElementById('vlc-open');
-  const orig = btn ? btn.textContent : '';
-  if (btn){ btn.disabled = true; btn.textContent = 'Opening…'; }
-  try {
-    const u = encodeURIComponent(currentStream.url);
-    const r = currentStream.referer ? `&referer=${encodeURIComponent(currentStream.referer)}` : '';
-    const resp = await fetch(`/open?url=${u}${r}&kind=${currentStream.kind}&mode=${mode}`);
-    if (!resp.ok){
-      const txt = await resp.text().catch(() => '');
-      const link = vlcUrl();
-      const copied = link ? await copyToClipboard(link) : false;
-      addLog('ERROR', `VLC launch failed: HTTP ${resp.status} — copied=${copied}`);
-      const msg = copied
-        ? `VLC couldn't be launched automatically (${resp.status}).\n\n✓ URL copied to clipboard.\n\nOpen VLC → Menu (☰) → New stream → Paste → Play.\n\n${txt.slice(0, 200)}`
-        : `VLC couldn't be launched (${resp.status}).\n\nCopy the URL manually:\n${link || ''}\n\n${txt.slice(0, 200)}`;
-      window.alert(msg);
-      return;
-    }
-    const j = await resp.json().catch(() => ({}));
-    addLog('OK', `VLC open [${mode}] → ${(j.target || '').slice(0, 100)}`);
-    if (btn) btn.textContent = '✓ Sent to VLC';
-  } catch(e){
-    addLog('ERROR', `VLC launch error: ${e.message}`);
-    window.alert('VLC launch error: ' + e.message);
-  } finally {
-    if (btn) setTimeout(() => { btn.disabled = false; btn.textContent = orig || '▶ Open in VLC'; }, 1500);
-  }
-}
-document.getElementById('vlc-copy').addEventListener('click', copyVlcLink);
-document.getElementById('vlc-open').addEventListener('click', openInVlc);
-document.getElementById('vlc-mode').addEventListener('change', updateVlcHint);
-// ---------------- END VLC ----------------
 
 // ---------------- CACHES ----------------
 function getCachedExtract(id, ep, type){
@@ -1425,7 +1229,7 @@ function clearStartupTimer(){
   if (startupTimer){ clearTimeout(startupTimer); startupTimer = null; }
 }
 
-// ---------------- OVERLAY (VLC removed) ----------------
+// ---------------- OVERLAY ----------------
 function showOverlay(msg, err=false, timerPrefix=null){
   overlay.innerHTML = '';
   overlay.classList.toggle('err', err);
@@ -1509,12 +1313,10 @@ function playFromData(data){
 
   if (isHlsStream(stream)){
     if (overlayTimer){ clearInterval(overlayTimer); overlayTimer = null; }
-    setVlcStream(stream.url, stream.referer, 'hls', provider);
     showOverlay('Connecting…');
     setStatus('Loading HLS', 'loading');
     loadHls(proxyM3U8(stream.url, stream.referer), subs, stream.referer, provider, stream.url);
   } else if (isMp4Stream(stream)){
-    setVlcStream(stream.url, stream.referer, 'mp4', provider);
     showOverlay('Connecting (MP4)…', false);
     setStatus('Loading MP4', 'loading');
     loadMp4(stream, subs, provider);
@@ -1531,13 +1333,6 @@ async function play(nocache = false, { deep = false } = {}){
   resetTrackControls();
 
   const sticky = getSticky(anilistId, currentEp, currentType);
-  if (sticky){
-    const kind = /\.mp4(\?|$)/i.test(sticky.url) ? 'mp4' : 'hls';
-    setVlcStream(sticky.url, sticky.referer, kind, 'sticky');
-    addLog('INFO', 'VLC prepopulated from sticky');
-  } else {
-    clearVlcStream();
-  }
 
   renderEpisodes();
   setStatus('Extracting', 'loading');
@@ -1546,7 +1341,6 @@ async function play(nocache = false, { deep = false } = {}){
   if (STREAM_URL_OVERRIDE){
     addLog('INFO', `override URL active`);
     const overrideKind = /\.mp4(\?|$)/i.test(STREAM_URL_OVERRIDE) ? 'mp4' : 'hls';
-    setVlcStream(STREAM_URL_OVERRIDE, STREAM_REF_OVERRIDE, overrideKind, 'override');
     setMetaBadge('meta-provider', 'override');
     showOverlay('Connecting to override…');
     setStatus('Override', 'loading');
@@ -1570,7 +1364,7 @@ async function play(nocache = false, { deep = false } = {}){
       loadHls(proxyM3U8(sticky.url, sticky.referer), [], sticky.referer, 'sticky', sticky.url);
     } else {
       addLog('ERROR', `play failed: ${e.message}`);
-      showProviderError(currentProvider, e.message + ' — or paste a URL into the External Player field');
+      showProviderError(currentProvider, e.message);
     }
   } finally { busy = false; }
 }
@@ -1588,15 +1382,12 @@ function showProviderError(provider, reason){
       <div style="font-size:15px;font-weight:700">Stream failed · <span style="color:var(--accent2,#a78bfa)">${esc(provider)}</span></div>
       <div style="font-size:12px;opacity:.75;line-height:1.55">${esc(reason || 'Manifest did not load')}</div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin-top:6px">
-        ${currentStream && currentStream.url ? '<button id="overlay-vlc" class="btn-accent" style="padding:10px 20px;max-width:180px">▶ Play in VLC</button>' : ''}
         <button id="overlay-reload" class="btn-ghost" style="padding:10px 18px;max-width:120px">Reload</button>
         <button id="overlay-next" class="btn-ghost" style="padding:10px 18px;max-width:130px">Next server</button>
         <button id="overlay-back" class="btn-ghost" style="padding:10px 18px;max-width:100px">Back</button>
       </div>
     </div>`;
 
-  const vlcBtn = document.getElementById('overlay-vlc');
-  if (vlcBtn) vlcBtn.addEventListener('click', (e) => { e.stopPropagation(); openInVlc(); });
   const reloadBtn = document.getElementById('overlay-reload');
   if (reloadBtn) reloadBtn.addEventListener('click', () => location.reload());
   const nextBtn = document.getElementById('overlay-next');
@@ -1845,7 +1636,6 @@ epList.addEventListener('click', ev => {
   if (n === currentEp) return;
   currentEp = n;
 
-  // Auto-expand card so user sees the change in context
   const card = document.getElementById('episodes-card');
   if (card && !card.classList.contains('expanded')){
     setEpisodesExpanded(true);
