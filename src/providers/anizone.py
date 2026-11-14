@@ -2,6 +2,7 @@ import asyncio
 import json
 import math
 import re
+import time
 from urllib.parse import quote
 
 import httpx
@@ -16,6 +17,43 @@ from src.providers._media import build_ctx
 
 NAME = "anizone"
 BASE = "https://anizone.to"
+
+# ─── Caches + shared client ─────────────────────────────────────────────
+_SERIES_EPISODES_CACHE: dict = {}   # anilistId -> (expires_at, dict)
+_SERIES_EPISODES_TTL = 600.0        # 10 min
+
+_SCRAPE_CACHE: dict = {}            # slug -> (expires_at, list)
+_SCRAPE_TTL = 600.0
+
+_GET_EP_CACHE: dict = {}            # anilistId -> (expires_at, dict)
+_GET_EP_TTL = 600.0
+
+_client: "httpx.AsyncClient | None" = None
+_client_lock: "asyncio.Lock | None" = None
+
+
+def _get_client_lock() -> asyncio.Lock:
+    global _client_lock
+    if _client_lock is None:
+        _client_lock = asyncio.Lock()
+    return _client_lock
+
+
+async def _get_client() -> httpx.AsyncClient:
+    global _client
+    if _client is None or _client.is_closed:
+        async with _get_client_lock():
+            if _client is None or _client.is_closed:
+                _client = httpx.AsyncClient(
+                    timeout=20.0,
+                    follow_redirects=True,
+                    limits=httpx.Limits(
+                        max_connections=30,
+                        max_keepalive_connections=20,
+                        keepalive_expiry=30.0,
+                    ),
+                )
+    return _client
 
 
 def _normalize_url(value) -> str:
@@ -87,11 +125,11 @@ async def _request(url, *, method="GET", headers=None, json_body=None, cookies=N
         h.update(headers)
     if cookies:
         h["Cookie"] = _cookie_header(cookies)
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-        if method == "POST":
-            res = await client.post(url, headers=h, json=json_body)
-        else:
-            res = await client.get(url, headers=h)
+    client = await _get_client()
+    if method == "POST":
+        res = await client.post(url, headers=h, json=json_body, timeout=timeout)
+    else:
+        res = await client.get(url, headers=h, timeout=timeout)
     text = res.text
     if res.status_code != 200:
         raise RuntimeError(f"AniZone HTTP {res.status_code}: {url}")
@@ -422,6 +460,16 @@ async def _load_page(state, slug) -> dict:
 
 
 async def scrape_series(slug: str, limit=None, max_pages=None) -> list:
+    now = time.time()
+    hit = _SCRAPE_CACHE.get(slug)
+    if hit and hit[0] > now:
+        cached = hit[1]
+        if limit is None:
+            return cached
+        max_cached = cached[-1]["number"] if cached else 0
+        if max_cached >= limit:
+            return [e for e in cached if e["number"] <= limit]
+
     initial = await _fetch_page(f"/anime/{slug}")
     state = _initial_page(initial["text"], initial["cookies"])
     items = list(state["items"])
@@ -435,6 +483,7 @@ async def scrape_series(slug: str, limit=None, max_pages=None) -> list:
     episodes = _parse_episodes(items)
     if not episodes:
         raise RuntimeError(f"AniZone has no episodes for {slug}")
+    _SCRAPE_CACHE[slug] = (now + _SCRAPE_TTL, episodes)
     return episodes
 
 
@@ -510,7 +559,14 @@ def _build_lists(anilist_id: int, episodes: list, mode: str, offset: int,
     return {"sub": sub, "dub": dub}
 
 
-async def _series_episodes(anilist_id: int, ctx: dict | None = None) -> dict:
+async def _series_episodes(anilist_id: int, ctx: dict | None = None,
+                           need_up_to=None) -> dict:
+    cache_key = int(anilist_id)
+    now = time.time()
+    hit = _SERIES_EPISODES_CACHE.get(cache_key)
+    if hit and hit[0] > now:
+        return hit[1]
+
     ctx = ctx or await build_ctx(anilist_id)
     media = ctx["media"]
     local_ctx = {**ctx, "media": media}
@@ -525,7 +581,16 @@ async def _series_episodes(anilist_id: int, ctx: dict | None = None) -> dict:
         resolve_series(anilist_id, local_ctx), _offset())
     offset = offset or 0
     expected = expected_count(media, ctx.get("anizip"))
-    limit = (expected + offset) if expected else None
+
+    full_limit = (expected + offset) if expected else None
+    if need_up_to is not None:
+        if full_limit is not None:
+            fetch_limit = min(int(need_up_to) + 50, full_limit)
+        else:
+            fetch_limit = int(need_up_to) + 50
+    else:
+        fetch_limit = full_limit
+
     max_pages = None
     try:
         raw_mp = (ctx or {}).get("maxPages")
@@ -534,23 +599,41 @@ async def _series_episodes(anilist_id: int, ctx: dict | None = None) -> dict:
             max_pages = max(1, int(float(raw_mp)))
     except (TypeError, ValueError):
         max_pages = None
-    raw_episodes = await scrape_series(series["slug"], limit, max_pages)
+
+    raw_episodes = await scrape_series(series["slug"], fetch_limit, max_pages)
     mode = _choose_mode(raw_episodes, expected, offset)
-    return {
+    episodes = _align_episodes(raw_episodes, media, expected)
+
+    is_partial = False
+    if full_limit is not None and fetch_limit is not None and fetch_limit < full_limit:
+        is_partial = True
+    elif full_limit is None and need_up_to is not None:
+        is_partial = True
+
+    result = {
         "media": media,
         "ctx": local_ctx,
         "series": series,
         "offset": offset,
         "expected": expected,
         "mode": mode,
-        "episodes": _align_episodes(raw_episodes, media, expected),
+        "episodes": episodes,
+        "partial": is_partial,
     }
+    if not is_partial:
+        _SERIES_EPISODES_CACHE[cache_key] = (now + _SERIES_EPISODES_TTL, result)
+    return result
 
 
 async def get_episodes(anilist_id: int, ctx: dict | None = None) -> dict:
+    now = time.time()
+    hit = _GET_EP_CACHE.get(int(anilist_id))
+    if hit and hit[0] > now:
+        return hit[1]
+
     data = await _series_episodes(anilist_id, ctx)
     series = data["series"]
-    return {
+    result = {
         "meta": {
             "id": series["slug"],
             "title": series["title"],
@@ -562,6 +645,8 @@ async def get_episodes(anilist_id: int, ctx: dict | None = None) -> dict:
         "episodes": _build_lists(int(anilist_id), data["episodes"], data["mode"],
                                  data["offset"], data["ctx"], data["expected"]),
     }
+    _GET_EP_CACHE[int(anilist_id)] = (now + _GET_EP_TTL, result)
+    return result
 
 
 async def scrape_watch(slug: str, episode: int) -> dict:
@@ -594,7 +679,7 @@ async def watch(anilist_id: int, audio: str, ep: int, ctx: dict | None = None) -
     audio = str(audio or "sub").lower()
     if audio not in ("sub", "dub", "all"):
         raise RuntimeError(f"AniZone unknown audio '{audio}' (expected sub, dub, or all)")
-    data = await _series_episodes(anilist_id, ctx)
+    data = await _series_episodes(anilist_id, ctx, need_up_to=int(ep))
 
     def _canon(number):
         return number - data["offset"] if data["mode"] == "offset" else number
