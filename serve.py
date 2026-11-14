@@ -1,9 +1,11 @@
-"""Serve the anime API + local UI + stream proxy.
+"""Serve the anime API + local UI + stream proxy + VLC launcher.
+Uses curl_cffi (browser TLS impersonation) for CDN bypass when available,
+falls back to httpx when cffi fails (e.g. non-Cloudflare CDNs).
 
 Run:  python serve.py
 
 Env overrides:
-  EXTRACT_TIMEOUT    provider extract timeout, default 25 (was 50)
+  EXTRACT_TIMEOUT    provider extract timeout, default 25
   RACE_TIMEOUT       full race timeout,      default 50
   EPISODES_TIMEOUT   default 90
   INFO_TIMEOUT       default 20
@@ -47,6 +49,7 @@ app.add_middleware(
 
 _shared_client: httpx.AsyncClient | None = None
 
+
 def get_http() -> httpx.AsyncClient:
     global _shared_client
     if _shared_client is None or _shared_client.is_closed:
@@ -57,8 +60,10 @@ def get_http() -> httpx.AsyncClient:
         )
     return _shared_client
 
+
 _cffi_session: "CffiAsyncSession | None" = None
 _cffi_lock = asyncio.Lock()
+
 
 async def get_cffi():
     global _cffi_session
@@ -70,21 +75,23 @@ async def get_cffi():
                 _cffi_session = CffiAsyncSession(max_clients=20)
     return _cffi_session
 
+
 TIMEOUTS = {
     "/anime/extract":  float(os.environ.get("EXTRACT_TIMEOUT",  "25")),
     "/anime/episodes": float(os.environ.get("EPISODES_TIMEOUT", "90")),
     "/anime/info":     float(os.environ.get("INFO_TIMEOUT",     "20")),
 }
 
+
 def _timeout_for(path: str, qp: dict = None) -> "float | None":
     qp = qp or {}
-    # Race (no provider param) gets RACE_TIMEOUT; single provider gets EXTRACT_TIMEOUT
     if path.startswith("/anime/extract") and "provider" not in qp:
         return float(os.environ.get("RACE_TIMEOUT", "50"))
     for prefix, t in TIMEOUTS.items():
         if path.startswith(prefix):
             return t
     return None
+
 
 CACHE_DIR = os.path.join(BASE_DIR, ".cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
@@ -99,11 +106,13 @@ MAX_CACHE_BODY = 8_000_000
 NEGATIVE_TTL = 60
 MIN_CACHE_BODY = 4
 
+
 def _ttl_for(path: str) -> int:
     for prefix, ttl in CACHE_TTL:
         if path.startswith(prefix):
             return ttl
     return 600
+
 
 def _ttl_for_body(path: str, body: bytes) -> int:
     base = _ttl_for(path)
@@ -116,8 +125,10 @@ def _ttl_for_body(path: str, body: bytes) -> int:
             pass
     return base
 
+
 def _cache_path(key: str) -> str:
     return os.path.join(CACHE_DIR, hashlib.md5(key.encode()).hexdigest() + ".json")
+
 
 def _cache_get(key: str):
     p = _cache_path(key)
@@ -134,6 +145,7 @@ def _cache_get(key: str):
     except Exception:
         return None
 
+
 def _cache_set(key, body, ct, status, ttl):
     if len(body) > MAX_CACHE_BODY or len(body) < MIN_CACHE_BODY:
         return
@@ -147,7 +159,9 @@ def _cache_set(key, body, ct, status, ttl):
     except Exception as e:
         log.warning(f"cache write failed: {e}")
 
+
 _last_reset = [time.time()]
+
 
 @app.middleware("http")
 async def reset_http_periodically(request: Request, call_next):
@@ -166,6 +180,7 @@ async def reset_http_periodically(request: Request, call_next):
             try: asyncio.create_task(old_cffi.close())
             except: pass
     return await call_next(request)
+
 
 @app.middleware("http")
 async def cache_and_log(request: Request, call_next):
@@ -198,9 +213,8 @@ async def cache_and_log(request: Request, call_next):
             cached_prov = ""
             try:
                 data = json.loads(hit["body"])
-                if isinstance(data, dict):
-                    if data.get("provider"):
-                        cached_prov = f" [cached from {data['provider']}]"
+                if isinstance(data, dict) and data.get("provider"):
+                    cached_prov = f" [cached from {data['provider']}]"
             except Exception:
                 pass
             log.info(f"{0:7.0f}ms  {hit['st']}  {path}{tag}{cached_prov}  [CACHE HIT]")
@@ -265,29 +279,36 @@ UA = ("Mozilla/5.0 (Linux; Android 13; SM-G991B) "
       "AppleWebKit/537.36 (KHTML, like Gecko) "
       "Chrome/131.0.0.0 Mobile Safari/537.36")
 
+
 def _origin(referer: str) -> str:
     p = referer.split("/", 3)
     return f"{p[0]}//{p[2]}" if len(p) >= 3 else referer
+
 
 def _is_m3u8_url(u: str) -> bool:
     path = u.split("?", 1)[0].lower()
     return path.endswith(".m3u8") or "m3u8" in path
 
+
 def _is_mp4_url(u: str) -> bool:
     path = u.split("?", 1)[0].lower()
     return path.endswith(".mp4") or path.endswith(".m4v")
+
 
 def _is_media_segment(u: str) -> bool:
     path = u.split("?", 1)[0].lower()
     return any(path.endswith(ext) for ext in (".ts", ".m4s", ".m4f", ".m4v", ".mp4", ".aac", ".webm"))
 
+
 def _looks_like_mp4(data: bytes) -> bool:
     if len(data) < 12: return False
     return data[4:8] in (b'ftyp', b'moov', b'mdat', b'free', b'skip', b'wide', b'styp')
 
+
 def _is_ass_url(u: str) -> bool:
     path = u.split("?", 1)[0].lower()
     return path.endswith(".ass") or path.endswith(".ssa")
+
 
 def _ass_to_vtt(ass_text: str) -> str:
     raw = ass_text.replace("\r\n", "\n").replace("\r", "\n")
@@ -331,6 +352,7 @@ def _ass_to_vtt(ass_text: str) -> str:
         out.append(f"{start} --> {end}"); out.append(text); out.append("")
     return "\n".join(out)
 
+
 def _build_cdn_headers(referer, range_hdr=None):
     h = {
         "User-Agent": UA,
@@ -351,6 +373,7 @@ def _build_cdn_headers(referer, range_hdr=None):
         h["Range"] = range_hdr
     return h
 
+
 def _is_good_media_resp(resp) -> bool:
     if resp is None or resp.status_code >= 400:
         return False
@@ -361,7 +384,9 @@ def _is_good_media_resp(resp) -> bool:
             or ct.startswith("application/x-mpegurl")
             or "mpegurl" in ct)
 
+
 CFFI_STRATEGIES = ["chrome131", "chrome120", "safari17_0", "chrome124"]
+
 
 async def _fetch_media_cffi(url, referer, range_hdr=None, overall_timeout=12.0):
     """Concurrent cffi fetch. First successful strategy wins."""
@@ -411,12 +436,14 @@ async def _fetch_media_cffi(url, referer, range_hdr=None, overall_timeout=12.0):
             except BaseException: pass
     return None, None, 0, "all strategies failed", {}
 
+
 async def _fetch_small(url: str, referer: "str | None"):
     headers = {"User-Agent": UA, "Accept": "*/*"}
     if referer:
         headers["Referer"] = referer
         headers["Origin"] = _origin(referer)
     return await get_http().get(url, headers=headers)
+
 
 def _rewrite_m3u8(text: str, base: str, referer: "str | None",
                   request_base: "str | None" = None) -> str:
@@ -440,6 +467,7 @@ def _rewrite_m3u8(text: str, base: str, referer: "str | None",
             out.append(s); continue
         out.append(wrap(s))
     return "\n".join(out)
+
 
 @app.get("/p/m3u8")
 async def proxy_m3u8(request: Request, url: str, referer: "str | None" = None,
@@ -466,6 +494,7 @@ async def proxy_m3u8(request: Request, url: str, referer: "str | None" = None,
                         media_type=r.headers.get("content-type", "text/plain"))
     return Response(content=_rewrite_m3u8(r.text, url, referer, request_base),
                     media_type="application/vnd.apple.mpegurl")
+
 
 @app.get("/p/seg")
 async def proxy_seg(request: Request, url: str, referer: "str | None" = None,
@@ -504,9 +533,6 @@ async def proxy_seg(request: Request, url: str, referer: "str | None" = None,
     range_hdr = request.headers.get("range")
     is_mp4 = _is_mp4_url(url)
 
-    # ═══════════ FAST PATH: httpx streaming for media segments ═══════════
-    # Skips the cffi buffer-then-return for segments; streams bytes directly.
-    # Falls back to cffi if the CDN returns a challenge or non-media response.
     if _is_media_segment(url) or is_mp4:
         try:
             fh = {"User-Agent": UA, "Accept": "*/*"}
@@ -543,13 +569,11 @@ async def proxy_seg(request: Request, url: str, referer: "str | None" = None,
 
                 return StreamingResponse(fast_body(), status_code=st, headers=out_headers)
 
-            # Not playable — close and fall through to cffi
             await upstream.aclose()
             log.info(f"/p/seg fast failed (status={st}, ct={ct[:40]}), trying cffi")
         except Exception as e:
             log.info(f"/p/seg fast exception: {e}, trying cffi")
 
-    # ═══════════ cffi fallback (buffered) ═══════════
     if HAS_CFFI:
         body, ct, status, label, hdrs = await _fetch_media_cffi(url, referer, range_hdr, overall_timeout=15.0)
         if body is not None:
@@ -565,7 +589,6 @@ async def proxy_seg(request: Request, url: str, referer: "str | None" = None,
                             headers=out_hdrs)
         log.warning(f"/p/seg cffi failed ({label}), trying httpx")
 
-    # ═══════════ Last-resort httpx (buffered, full logic) ═══════════
     fwd_headers = {"User-Agent": UA, "Accept": "*/*"}
     if referer:
         fwd_headers["Referer"] = referer
@@ -636,7 +659,6 @@ async def proxy_seg(request: Request, url: str, referer: "str | None" = None,
     return StreamingResponse(body(), status_code=upstream.status_code, headers=out_headers)
 
 
-# ═══════════════ VLC launcher (kept for backwards compat, harmless) ═══════════════
 def _launch_vlc(url: str, mime: str) -> "tuple[bool, str]":
     am = shutil.which("termux-am") or shutil.which("am")
     if not am:
@@ -655,6 +677,7 @@ def _launch_vlc(url: str, mime: str) -> "tuple[bool, str]":
     if "Could not connect to socket" in last_err or "No such file" in last_err:
         return False, "Termux am socket server is disabled in this build."
     return False, last_err or "launch failed"
+
 
 @app.get("/open")
 async def open_vlc(request: Request, url: str, referer: str = "", kind: str = "hls", mode: str = "raw"):
@@ -685,12 +708,14 @@ RECENT_FILE = os.path.join(CACHE_DIR, "_recent.json")
 RECENT_MAX = 50
 _recent_lock = asyncio.Lock()
 
+
 def _recent_load() -> list:
     try:
         with open(RECENT_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return []
+
 
 def _recent_save(items: list):
     try:
@@ -701,9 +726,11 @@ def _recent_save(items: list):
     except Exception as e:
         log.warning(f"recent save failed: {e}")
 
+
 @app.get("/recent")
 async def recent_list():
     return {"items": _recent_load()}
+
 
 @app.post("/recent")
 async def recent_add(request: Request):
@@ -723,11 +750,13 @@ async def recent_add(request: Request):
         _recent_save(items)
     return {"ok": True, "count": len(items)}
 
+
 @app.delete("/recent")
 async def recent_clear():
     async with _recent_lock:
         _recent_save([])
     return {"ok": True}
+
 
 @app.get("/health")
 async def health():
@@ -745,19 +774,23 @@ async def health():
         "fast_segments": True,
     }
 
+
 if not os.path.isdir(STATIC_DIR):
     log.error(f"[startup] STATIC_DIR missing: {STATIC_DIR}")
 app.mount("/ui", StaticFiles(directory=STATIC_DIR, html=True), name="static")
 
 app.router.routes = [r for r in app.routes if getattr(r, "path", None) != "/"]
 
+
 @app.get("/")
 def _root_redirect():
     return RedirectResponse(url="/ui/", status_code=302)
 
+
 @app.get("/player")
 def _player_shortcut():
     return RedirectResponse(url="/ui/player.html", status_code=302)
+
 
 if __name__ == "__main__":
     import uvicorn
