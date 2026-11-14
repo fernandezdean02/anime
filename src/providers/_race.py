@@ -9,13 +9,19 @@ RANKING = [
     "kaa", "anibd", "animegg", "mkissa", "animeonsen",
 ]
 
-WATCH_TIMEOUT = 75.0
-EPISODES_TIMEOUT = 60.0
-WATCH_CACHE_TTL = 45.0
+# ─── Timeout strategy ──────────────────────────────────────────────────
+# Since all providers race in parallel, worst-case total = max(timeout).
+# Good providers return in <10s; slower ones get more but capped.
+WATCH_TIMEOUT        = 22.0   # was 75.0 — huge win, worst case now 22s not 75s
+FAST_PROVIDER_TIMEOUT = 8.0   # proven-fast providers fail fast on regression
+DRAIN_AFTER_WIN      = 1.0    # was 8.0 — just enough to record latency, not hunt for winner
+EPISODES_TIMEOUT     = 30.0   # was 60.0 — merged_episodes waits for slowest
+WATCH_CACHE_TTL      = 300.0  # was 45.0 — 5 min makes ep-switching back/forth instant
 
 _latency: dict = {}
 _ep_latency: dict = {}
 _failures: dict = {}
+_last_win: dict = {}    # anilistId -> (provider_name, timestamp)
 _watch_cache: dict = {}
 
 
@@ -46,6 +52,19 @@ def record_latency(name: str, seconds: float, ok: bool, kind: str = "watch"):
         _failures[name] = _failures.get(name, 0) + 1
 
 
+def _provider_timeout(name: str) -> float:
+    """Adaptive per-provider timeout. Fast providers get shorter timeouts;
+    providers with a streak of failures get even shorter leashes so they
+    stop dragging the race out."""
+    fails = _failures.get(name, 0)
+    if fails >= 3:
+        return FAST_PROVIDER_TIMEOUT
+    avg = _latency.get(name)
+    if avg is None:
+        return WATCH_TIMEOUT
+    return max(FAST_PROVIDER_TIMEOUT, min(WATCH_TIMEOUT, avg * 4))
+
+
 def default_provider():
     if not _latency:
         return RANKING[0]
@@ -55,24 +74,27 @@ def default_provider():
 def latency_table() -> dict:
     return {name: {"avg_seconds": _latency.get(name),
                    "episodes_seconds": _ep_latency.get(name),
-                   "failures": _failures.get(name, 0)}
+                   "failures": _failures.get(name, 0),
+                   "effective_timeout": round(_provider_timeout(name), 1)}
             for name in RANKING}
 
 
-async def _watch_one(mod, name, anilist_id, ep, audio, ctx):
+async def _watch_one(mod, name, anilist_id, ep, audio, ctx, timeout):
     key = (name, anilist_id, ep, audio)
     hit = _watch_cache.get(key)
     if hit and hit[0] > time.time():
         return name, hit[1], 0.0, True
     t0 = time.time()
     try:
-        streams = await asyncio.wait_for(mod.watch(anilist_id, audio, ep, ctx), WATCH_TIMEOUT)
+        streams = await asyncio.wait_for(mod.watch(anilist_id, audio, ep, ctx), timeout)
         dt = round(time.time() - t0, 3)
         if streams:
             _watch_cache[key] = (time.time() + WATCH_CACHE_TTL, streams)
             return name, streams, dt, True
         return name, None, dt, False
-    except Exception as e:
+    except asyncio.TimeoutError:
+        return name, None, round(time.time() - t0, 3), False
+    except Exception:
         return name, None, round(time.time() - t0, 3), False
 
 
@@ -82,39 +104,55 @@ async def race_watch(anilist_id: int, ep: int, audio: str = "sub",
     if not mods:
         return None
     ctx = await build_ctx(anilist_id)
+
+    # Priority ordering only affects which task starts first (microseconds
+    # matter for cancellation order, not for who wins). The real speedup
+    # comes from racing EVERYONE simultaneously, not sequencing.
+    last_win = _last_win.get(anilist_id, (None, 0))[0]
+    priority = []
     if preferred:
-        pick = next((m for m in mods if m[0] == preferred), None)
+        priority.append(preferred)
+    if last_win and last_win not in priority:
+        priority.append(last_win)
+
+    ordered = []
+    seen = set()
+    for pname in priority:
+        pick = next((m for m in mods if m[0] == pname), None)
         if pick is not None:
-            name, streams, dt, ok = await _watch_one(pick[1], pick[0], anilist_id, ep, audio, ctx)
-            record_latency(name, dt, ok)
-            if ok:
-                return {"provider": name, "streams": streams,
-                        "requestedProvider": preferred,
-                        "timings": {name: {"seconds": dt, "ok": True}},
-                        "defaultProvider": default_provider()}
-            mods = [m for m in mods if m[0] != preferred]
-            if not mods:
-                return None
-    pending = {asyncio.ensure_future(_watch_one(mod, name, anilist_id, ep, audio, ctx))
-               for name, mod in mods}
+            ordered.append(pick)
+            seen.add(pname)
+    for m in mods:
+        if m[0] not in seen:
+            ordered.append(m)
+
+    pending = {
+        asyncio.ensure_future(
+            _watch_one(mod, name, anilist_id, ep, audio, ctx, _provider_timeout(name))
+        )
+        for name, mod in ordered
+    }
     timings: dict = {}
     winner = None
     try:
         while pending:
             done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
             for task in done:
-                name, streams, dt, ok = task.result()
+                try:
+                    name, streams, dt, ok = task.result()
+                except Exception:
+                    continue
                 timings[name] = {"seconds": dt, "ok": ok}
                 record_latency(name, dt, ok)
                 if ok and winner is None:
                     winner = {"provider": name, "streams": streams}
+                    _last_win[anilist_id] = (name, time.time())
             if winner is not None:
                 break
     finally:
-
         if pending:
             try:
-                done2, pending2 = await asyncio.wait(pending, timeout=8.0)
+                done2, pending2 = await asyncio.wait(pending, timeout=DRAIN_AFTER_WIN)
                 for task in done2:
                     try:
                         name, streams, dt, ok = task.result()
