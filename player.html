@@ -31,8 +31,8 @@
             <span class="status-pill" id="status-pill">
               <span class="dot"></span><span id="status-text">Idle</span>
             </span>
-            <span class="meta-badge" id="meta-provider" hidden></span>
-            <span class="meta-badge" id="meta-quality" hidden></span>
+            <span class="meta-badge" id="meta-provider">—</span>
+            <span class="meta-badge" id="meta-quality">—</span>
           </div>
         </div>
       </div>
@@ -42,11 +42,11 @@
       <div class="card">
         <h3>Audio <span class="badge empty" id="audio-count">—</span></h3>
         <select id="audio-select" class="track-select" disabled>
-          <option>Loading…</option>
+          <option>No audio yet</option>
         </select>
       </div>
 
-      <div class="card" id="quality-card" hidden>
+      <div class="card" id="quality-card">
         <h3>Quality <span class="badge empty" id="quality-count">—</span></h3>
         <select id="quality-select" class="track-select" disabled>
           <option value="-1">Auto</option>
@@ -55,7 +55,7 @@
 
       <div class="card" id="cc-section">
         <h3>Captions <span class="badge empty" id="caption-count">—</span></h3>
-        <select id="caption-select" class="track-select">
+        <select id="caption-select" class="track-select" disabled>
           <option value="-1">Off</option>
         </select>
       </div>
@@ -302,7 +302,6 @@ header .brand {
   transition: border-color 0.2s;
 }
 .card:hover { border-color: rgba(124, 92, 255, 0.2); }
-.card[hidden] { display: none !important; }
 
 .card h3 {
   font-size: 11px; font-weight: 700;
@@ -352,7 +351,7 @@ header .brand {
 }
 .track-select:hover:not(:disabled) { background-color: rgba(0, 0, 0, 0.55); }
 .track-select:focus { border-color: var(--accent, #7c5cff); box-shadow: 0 0 0 3px rgba(124, 92, 255, 0.12); }
-.track-select:disabled { opacity: 0.55; cursor: not-allowed; }
+.track-select:disabled { opacity: 0.75; cursor: not-allowed; }
 .track-select option { background: #14141c; color: var(--text); padding: 8px; }
 
 .slider-row {
@@ -409,7 +408,7 @@ header .brand {
   font-variant-numeric: tabular-nums;
 }
 
-/* ═══════ EPISODES — much bigger now that VLC is gone ═══════ */
+/* ═══════ EPISODES ═══════ */
 .episodes-card {
   flex: 1;
   min-height: 0;
@@ -478,6 +477,7 @@ header .brand {
   color: var(--accent2, #a78bfa);
 }
 
+/* 5-column grid — scrollbar-gutter reserves space so buttons never resize */
 .ep-list {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -486,14 +486,17 @@ header .brand {
   overflow-x: hidden;
   flex: 1;
   min-height: 100px;
-  padding: 2px 2px 2px 0;
+  padding: 2px 4px 2px 0;
   scrollbar-width: thin;
   scrollbar-color: rgba(124, 92, 255, 0.35) rgba(255, 255, 255, 0.03);
+  scrollbar-gutter: stable;
 }
 .ep-list button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  box-sizing: border-box;
+  min-height: 38px;
   padding: 12px 4px;
   background: rgba(0, 0, 0, 0.4);
   border: 1px solid rgba(255, 255, 255, 0.06);
@@ -523,6 +526,9 @@ header .brand {
 }
 
 .retry {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 100%;
   padding: 12px;
   background: rgba(255, 255, 255, 0.04);
@@ -532,6 +538,7 @@ header .brand {
   font-size: 13px; font-weight: 700;
   cursor: pointer;
   transition: all .15s;
+  line-height: 1;
 }
 .retry:hover { background: rgba(124, 92, 255, 0.08); border-color: rgba(124, 92, 255, 0.3); color: var(--accent2, #a78bfa); }
 
@@ -764,7 +771,7 @@ function setStatus(text, state = 'idle'){
 function setMetaBadge(id, text){
   const el = document.getElementById(id);
   if (!el) return;
-  if (text){ el.textContent = text; el.hidden = false; } else { el.hidden = true; }
+  el.textContent = text || '—';
 }
 // ---------------- END STATUS ----------------
 
@@ -860,18 +867,16 @@ document.addEventListener('click', () => {
 function resetTrackControls(){
   const audioSel = document.getElementById('audio-select');
   const audioCount = document.getElementById('audio-count');
-  if (audioSel){ audioSel.innerHTML = '<option>Loading…</option>'; audioSel.disabled = true; }
+  if (audioSel){ audioSel.innerHTML = '<option>No audio yet</option>'; audioSel.disabled = true; }
   if (audioCount){ audioCount.textContent = '—'; audioCount.classList.add('empty'); }
 
   const capSel = document.getElementById('caption-select');
   const capCount = document.getElementById('caption-count');
-  if (capSel){ capSel.innerHTML = '<option value="-1">Off</option>'; capSel.value = '-1'; }
+  if (capSel){ capSel.innerHTML = '<option value="-1">Off</option>'; capSel.value = '-1'; capSel.disabled = true; }
   if (capCount){ capCount.textContent = '—'; capCount.classList.add('empty'); }
 
-  const qCard = document.getElementById('quality-card');
   const qSel = document.getElementById('quality-select');
   const qCount = document.getElementById('quality-count');
-  if (qCard) qCard.hidden = true;
   if (qSel){ qSel.innerHTML = '<option value="-1">Auto</option>'; qSel.value = '-1'; qSel.disabled = true; }
   if (qCount){ qCount.textContent = '—'; qCount.classList.add('empty'); }
 
@@ -960,16 +965,17 @@ document.getElementById('caption-select').addEventListener('change', (e) => {
   applyCaptionTrack(parseInt(e.target.value, 10));
 });
 
-// ---------------- QUALITY ----------------
+// ---------------- QUALITY (always visible card) ----------------
 function populateQualityDropdown(){
-  const card = document.getElementById('quality-card');
   const sel = document.getElementById('quality-select');
   const countEl = document.getElementById('quality-count');
   if (!sel) return;
 
   const levels = (hls && Array.isArray(hls.levels)) ? hls.levels : [];
   if (!levels.length){
-    if (card) card.hidden = true;
+    sel.innerHTML = '<option value="-1">Auto</option>';
+    sel.value = '-1';
+    sel.disabled = true;
     if (countEl){ countEl.textContent = '—'; countEl.classList.add('empty'); }
     return;
   }
@@ -986,11 +992,13 @@ function populateQualityDropdown(){
   const sorted = [...byHeight.values()].sort((a, b) => b.h - a.h);
 
   if (!sorted.length){
-    if (card) card.hidden = true;
+    sel.innerHTML = '<option value="-1">Auto</option>';
+    sel.value = '-1';
+    sel.disabled = true;
+    if (countEl){ countEl.textContent = '—'; countEl.classList.add('empty'); }
     return;
   }
 
-  if (card) card.hidden = false;
   const current = hls.autoLevelEnabled ? -1 : hls.currentLevel;
   let html = `<option value="-1"${current === -1 ? ' selected' : ''}>Auto</option>`;
   sorted.forEach(lv => {
@@ -1178,7 +1186,7 @@ function episodesFor(type){
 function renderEpisodes(){
   const list = episodesFor(currentType);
   if (!list.length){
-    epList.innerHTML = `<span class="hint">No ${currentType} episodes available.</span>`;
+    epList.innerHTML = `<span class="hint">Loading episodes…</span>`;
     return;
   }
   epList.innerHTML = list.map(e =>
@@ -1341,7 +1349,6 @@ async function play(nocache = false, { deep = false } = {}){
 
   if (STREAM_URL_OVERRIDE){
     addLog('INFO', `override URL active`);
-    const overrideKind = /\.mp4(\?|$)/i.test(STREAM_URL_OVERRIDE) ? 'mp4' : 'hls';
     setMetaBadge('meta-provider', 'override');
     showOverlay('Connecting to override…');
     setStatus('Override', 'loading');
