@@ -1,8 +1,10 @@
+import asyncio
+
 import httpx
 
 from src.extractor import anilist_query
 from src.providers import _cache
-from src.providers._http import UA
+from src.providers._http import UA, _get_client
 
 ARM = "https://arm.haglund.dev/api/v2/ids"
 ANIZIP = "https://api.ani.zip/mappings"
@@ -20,11 +22,12 @@ _STATUS = {"RELEASING": "RELEASING", "FINISHED": "FINISHED",
 
 async def _fetch_arm(anilist_id: int):
     try:
-        async with httpx.AsyncClient(timeout=12.0) as client:
-            res = await client.get(
-                f"{ARM}?source=anilist&id={anilist_id}",
-                headers={"User-Agent": UA, "Accept": "application/json"},
-            )
+        client = await _get_client()
+        res = await client.get(
+            f"{ARM}?source=anilist&id={anilist_id}",
+            headers={"User-Agent": UA, "Accept": "application/json"},
+            timeout=12.0,
+        )
         if res.status_code != 200:
             return None
         return res.json()
@@ -39,7 +42,6 @@ async def get_media(anilist_id: int) -> dict:
         return hit
     arm, data = None, None
     try:
-        import asyncio
         arm, data = await asyncio.gather(
             _fetch_arm(anilist_id),
             anilist_query(MEDIA_QUERY, {"id": int(anilist_id)}),
@@ -72,15 +74,25 @@ async def get_media(anilist_id: int) -> dict:
 
 
 async def get_anizip(anilist_id: int):
+    # AniZip mappings don't change — cache for 24h with the rest of the
+    # identity/mapping data. Previously uncached, meaning every request
+    # paid a fresh HTTP round trip (~500ms–1s) for the same payload.
+    key = f"np-anizip:{int(anilist_id)}"
+    hit = _cache.cached(key, _cache.MAPPING_TTL)
+    if hit is not None:
+        return hit
     try:
-        async with httpx.AsyncClient(timeout=12.0) as client:
-            res = await client.get(
-                f"{ANIZIP}?anilist_id={anilist_id}",
-                headers={"User-Agent": UA, "Accept": "application/json"},
-            )
+        client = await _get_client()
+        res = await client.get(
+            f"{ANIZIP}?anilist_id={anilist_id}",
+            headers={"User-Agent": UA, "Accept": "application/json"},
+            timeout=12.0,
+        )
         if res.status_code != 200:
             return None
-        return res.json()
+        data = res.json()
+        _cache.set(key, data, _cache.MAPPING_TTL)
+        return data
     except Exception:
         return None
 
