@@ -94,10 +94,11 @@
         <div id="vlc-hint" class="hint" style="margin-top:8px">No stream yet</div>
       </div>
 
-      <div class="card episodes-card">
-        <h3>
+      <div class="card episodes-card" id="episodes-card">
+        <h3 class="episodes-header" id="episodes-header" role="button" tabindex="0" aria-expanded="false" aria-controls="ep-list">
           <span class="ep-title">Episodes</span>
           <span id="ep-source" class="ep-source"></span>
+          <svg class="ep-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
         </h3>
         <div class="ep-list" id="ep-list"><span class="hint">Loading…</span></div>
       </div>
@@ -125,14 +126,8 @@
   scrollbar-width: thin;
   scrollbar-color: rgba(124, 92, 255, 0.35) rgba(255, 255, 255, 0.03);
 }
-*::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
-*::-webkit-scrollbar-track {
-  background: rgba(255, 255, 255, 0.02);
-  border-radius: 4px;
-}
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-track { background: rgba(255, 255, 255, 0.02); border-radius: 4px; }
 *::-webkit-scrollbar-thumb {
   background: rgba(124, 92, 255, 0.28);
   border-radius: 4px;
@@ -145,10 +140,7 @@
 }
 *::-webkit-scrollbar-corner { background: transparent; }
 
-/* Native form controls dark mode */
-select, input, textarea, button, option {
-  color-scheme: dark;
-}
+select, input, textarea, button, option { color-scheme: dark; }
 
 /* ═══════ THEME ═══════ */
 :root {
@@ -376,11 +368,7 @@ header .brand {
 .track-select:hover:not(:disabled) { background-color: rgba(0, 0, 0, 0.55); }
 .track-select:focus { border-color: var(--accent, #7c5cff); box-shadow: 0 0 0 3px rgba(124, 92, 255, 0.12); }
 .track-select:disabled { opacity: 0.55; cursor: not-allowed; }
-.track-select option {
-  background: #14141c;
-  color: var(--text);
-  padding: 8px;
-}
+.track-select option { background: #14141c; color: var(--text); padding: 8px; }
 
 /* Sliders */
 .slider-row {
@@ -501,61 +489,116 @@ header .brand {
 }
 .btn-ghost:disabled, .btn-accent:disabled { opacity: 0.5; cursor: not-allowed; }
 
-/* Episodes */
-.episodes-card { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-.episodes-card h3 {
+/* Episodes — expandable dropdown-style card, 5-column grid */
+.episodes-card {
+  flex: 1;
+  min-height: 0;
   display: flex;
-  align-items: baseline;
-  gap: 6px;
+  flex-direction: column;
+  max-height: 420px;
+  transition: max-height 0.32s cubic-bezier(0.22, 0.61, 0.36, 1);
+  overflow: hidden;
+}
+.episodes-card.expanded { max-height: 78vh; }
+
+/* Clickable header — beats .card h3 specificity via .episodes-card h3.episodes-header */
+.episodes-card h3.episodes-header {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
   flex-wrap: nowrap;
   min-width: 0;
+  margin: 0 0 10px;
+  padding: 2px 0;
+  cursor: pointer;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  border-radius: 6px;
 }
-.episodes-card h3 .ep-title {
+.episodes-card h3.episodes-header:hover .ep-title { color: var(--text); }
+.episodes-card h3.episodes-header:focus-visible {
+  outline: 2px solid var(--accent, #7c5cff);
+  outline-offset: 4px;
+}
+.episodes-card h3.episodes-header .ep-title {
   flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  white-space: nowrap;
+  transition: color 0.15s;
 }
-.ep-source {
-  flex: 1;
+.episodes-card h3.episodes-header .ep-source {
+  margin-left: auto;
+  flex-shrink: 1;
   min-width: 0;
+  max-width: 40%;
   font-size: 9px;
   color: var(--muted);
-  text-transform: none;
   font-weight: 500;
+  text-transform: none;
   letter-spacing: 0;
-  text-align: right;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  text-align: right;
+}
+.episodes-card h3.episodes-header .ep-chevron {
+  flex-shrink: 0;
+  color: var(--muted);
+  transition: transform 0.32s cubic-bezier(0.22, 0.61, 0.36, 1), color 0.15s;
+}
+.episodes-card h3.episodes-header:hover .ep-chevron { color: var(--accent2, #a78bfa); }
+.episodes-card.expanded h3.episodes-header .ep-chevron {
+  transform: rotate(180deg);
+  color: var(--accent2, #a78bfa);
 }
 
+/* 5-column grid */
 .ep-list {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(46px, 1fr));
-  gap: 5px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 6px;
   overflow-y: auto;
-  max-height: 260px;
-  padding-right: 2px;
+  overflow-x: hidden;
+  flex: 1;
+  min-height: 100px;
+  padding: 2px 2px 2px 0;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(124, 92, 255, 0.35) rgba(255, 255, 255, 0.03);
 }
 .ep-list button {
-  padding: 8px 2px;
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.05);
+  padding: 12px 4px;
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid rgba(255, 255, 255, 0.06);
   color: var(--text);
-  border-radius: 7px;
-  font-size: 11px;
+  border-radius: 10px;
+  font-size: 13px;
   font-weight: 600;
   cursor: pointer;
-  transition: all .12s;
+  transition: background-color 0.15s, border-color 0.15s, transform 0.1s;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   min-width: 0;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+  text-align: center;
+  -webkit-tap-highlight-color: transparent;
 }
-.ep-list button:hover { background: rgba(124, 92, 255, 0.08); border-color: rgba(124, 92, 255, 0.25); }
+.ep-list button:hover {
+  background: rgba(0, 0, 0, 0.55);
+  border-color: rgba(124, 92, 255, 0.35);
+}
+.ep-list button:active { transform: scale(0.96); }
 .ep-list button.active {
   background: linear-gradient(135deg, var(--accent, #7c5cff), var(--accent2, #a78bfa));
   color: white;
   border-color: transparent;
-  box-shadow: 0 2px 8px var(--glow);
+  box-shadow: 0 2px 10px var(--glow), inset 0 1px 0 rgba(255, 255, 255, 0.15);
 }
 
 .retry {
@@ -844,9 +887,7 @@ function applyVolume(pct){
     video.volume = Math.min(1, clamped / 100);
     return;
   }
-  if (audioCtx.state === 'suspended'){
-    audioCtx.resume().catch(()=>{});
-  }
+  if (audioCtx.state === 'suspended') audioCtx.resume().catch(()=>{});
   video.volume = 1.0;
   audioGainNode.gain.value = clamped / 100;
 }
@@ -891,7 +932,7 @@ brightnessSlider.addEventListener('input', (e) => {
   applyBrightness(b);
 });
 
-// Resume audio ctx on first user gesture (autoplay policy)
+// Resume audio ctx on first user gesture
 document.addEventListener('click', () => {
   if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume().catch(()=>{});
 }, { once: false });
@@ -1015,7 +1056,6 @@ function populateQualityDropdown(){
     return;
   }
 
-  // Dedupe by height (pick highest bitrate per height)
   const byHeight = new Map();
   levels.forEach((l, i) => {
     const h = l.height || 0;
@@ -1056,6 +1096,48 @@ document.getElementById('quality-select').addEventListener('change', (e) => {
   }
 });
 // ---------------- END QUALITY ----------------
+
+// ---------------- EPISODES EXPAND/COLLAPSE ----------------
+function setEpisodesExpanded(expanded){
+  const card = document.getElementById('episodes-card');
+  const header = document.getElementById('episodes-header');
+  if (!card || !header) return;
+  card.classList.toggle('expanded', expanded);
+  header.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+  try { localStorage.setItem('episodes-expanded', expanded ? '1' : '0'); } catch {}
+  if (expanded){
+    setTimeout(() => {
+      const active = document.querySelector('.ep-list button.active');
+      if (active) active.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }, 340);
+  }
+}
+
+(function bindEpisodesToggle(){
+  const card = document.getElementById('episodes-card');
+  const header = document.getElementById('episodes-header');
+  if (!card || !header) return;
+
+  try {
+    if (localStorage.getItem('episodes-expanded') === '1'){
+      card.classList.add('expanded');
+      header.setAttribute('aria-expanded', 'true');
+    }
+  } catch {}
+
+  header.addEventListener('click', (e) => {
+    e.preventDefault();
+    setEpisodesExpanded(!card.classList.contains('expanded'));
+  });
+
+  header.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' '){
+      e.preventDefault();
+      setEpisodesExpanded(!card.classList.contains('expanded'));
+    }
+  });
+})();
+// ---------------- END EPISODES TOGGLE ----------------
 
 // ---------------- VLC ----------------
 function vlcUrlInputEl(){ return document.getElementById('vlc-url-input'); }
@@ -1265,7 +1347,7 @@ function proxySeg(url, referer){
   return p;
 }
 
-// ---------------- EPISODES ----------------
+// ---------------- EPISODES DATA ----------------
 function getCachedEpisodes(id){
   try {
     const raw = sessionStorage.getItem(epsKey(id));
@@ -1343,7 +1425,7 @@ function clearStartupTimer(){
   if (startupTimer){ clearTimeout(startupTimer); startupTimer = null; }
 }
 
-// ---------------- OVERLAY (VLC button removed) ----------------
+// ---------------- OVERLAY (VLC removed) ----------------
 function showOverlay(msg, err=false, timerPrefix=null){
   overlay.innerHTML = '';
   overlay.classList.toggle('err', err);
@@ -1371,7 +1453,6 @@ function showOverlay(msg, err=false, timerPrefix=null){
       overlay.appendChild(text);
     }
   }
-  // (VLC shortcut removed — sidebar handles it)
 }
 function hideOverlay(){
   if (overlayTimer){ clearInterval(overlayTimer); overlayTimer = null; }
@@ -1763,6 +1844,18 @@ epList.addEventListener('click', ev => {
   const n = Number(b.dataset.ep);
   if (n === currentEp) return;
   currentEp = n;
+
+  // Auto-expand card so user sees the change in context
+  const card = document.getElementById('episodes-card');
+  if (card && !card.classList.contains('expanded')){
+    setEpisodesExpanded(true);
+  } else {
+    setTimeout(() => {
+      const active = document.querySelector('.ep-list button.active');
+      if (active) active.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }, 50);
+  }
+
   play();
 });
 
