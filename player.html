@@ -729,7 +729,6 @@ const PLACEHOLDER = "data:image/svg+xml;utf8," + encodeURIComponent(
    </svg>`);
 
 // ─── TIMEOUTS (aligned with serve.py backend limits + 5s buffer) ───
-// Backend: EXTRACT_TIMEOUT=25s, RACE_TIMEOUT=50s, EPISODES_TIMEOUT=90s
 const EXTRACT_TIMEOUT_MS   = 30000;
 const FULL_RACE_TIMEOUT_MS = 55000;
 const DEEP_RACE_TIMEOUT_MS = 65000;
@@ -1521,10 +1520,11 @@ function loadHls(src, subs, referer, provider, rawUrl){
       levelLoadingRetryDelay: 500,
       levelLoadingMaxRetryTimeout: 64000,
 
-      fragLoadingTimeOut: 20000,
-      fragLoadingMaxRetry: 8,
-      fragLoadingRetryDelay: 500,
-      fragLoadingMaxRetryTimeout: 64000,
+      // ─── Fragment retries: generous for slow mobile networks ───
+      fragLoadingTimeOut: 45000,
+      fragLoadingMaxRetry: 15,
+      fragLoadingRetryDelay: 800,
+      fragLoadingMaxRetryTimeout: 120000,
 
       appendErrorMaxRetry: 5,
       maxStarvationDelay: 4,
