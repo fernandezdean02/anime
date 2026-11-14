@@ -541,6 +541,33 @@ header .brand {
 }
 .retry:hover { background: rgba(124, 92, 255, 0.08); border-color: rgba(124, 92, 255, 0.3); color: var(--accent2, #a78bfa); }
 
+.btn-ghost, .btn-accent {
+  border-radius: 9px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+.btn-ghost {
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+}
+.btn-ghost:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(124, 92, 255, 0.3);
+}
+.btn-accent {
+  background: linear-gradient(135deg, var(--accent, #7c5cff), var(--accent2, #a78bfa));
+  color: #fff;
+  border-color: transparent;
+  box-shadow: 0 3px 10px var(--glow);
+}
+.btn-accent:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 5px 16px var(--glow);
+}
+
 .hint { font-size: 11px; color: var(--muted); line-height: 1.5; }
 
 .overlay {
@@ -685,7 +712,7 @@ $('#log-copy').addEventListener('click', async () => {
 // ---------------- END DEV LOG ----------------
 
 // ---------------- PROVIDERS ----------------
-const ALL_PROVIDERS = ['kaa', 'anizone', 'aniwaves', 'anineko', 'animeonsen', 'anikoto', 'mkissa', 'animegg'];
+const ALL_PROVIDERS = ['kaa', 'anizone', 'aniwaves', 'anineko', 'animeonsen', 'anikoto', 'mkissa', 'animegg', 'anibd'];
 const PROVIDER_LIST = [...new Set(ALL_PROVIDERS)];
 const DEFAULT_PROVIDER = 'anizone';
 const PROVIDER_STORAGE_KEY = 'provider-pref';
@@ -1580,6 +1607,7 @@ function loadHls(src, subs, referer, provider, rawUrl){
       clearStartupTimer(); hideOverlay();
       setStatus('Playing', 'playing');
       if (rawUrl) saveSticky(anilistId, currentEp, currentType, rawUrl, referer);
+      try { sessionStorage.removeItem(`adv:${anilistId}:${currentEp}:${currentType}`); } catch {}
       video.removeEventListener('playing', onPlaying);
     };
     video.addEventListener('playing', onPlaying);
@@ -1599,9 +1627,34 @@ function loadHls(src, subs, referer, provider, rawUrl){
         return;
       }
 
+      // ═══ Manifest errors: auto-advance to next provider ═══
       if (/manifest/i.test(d.details || '')){
         if (hls){ try { hls.destroy(); } catch(_){} hls = null; }
         clearSticky(anilistId, currentEp, currentType);
+
+        const attemptKey = `adv:${anilistId}:${currentEp}:${currentType}`;
+        let attempts = 0;
+        try { attempts = parseInt(sessionStorage.getItem(attemptKey) || '0', 10); } catch {}
+
+        if (attempts < PROVIDER_LIST.length - 1){
+          try { sessionStorage.setItem(attemptKey, String(attempts + 1)); } catch {}
+
+          const curIdx = PROVIDER_LIST.indexOf(currentProvider);
+          const nextIdx = curIdx >= 0 ? (curIdx + 1) % PROVIDER_LIST.length : 0;
+          const next = PROVIDER_LIST[nextIdx];
+
+          addLog('WARN', `manifest failed on ${provider} (requested ${currentProvider}), trying ${next}`);
+          currentProvider = next;
+          try { sessionStorage.setItem(PROVIDER_STORAGE_KEY, currentProvider); } catch {}
+          const sel = document.getElementById('provider-select');
+          if (sel) sel.value = currentProvider;
+          clearExtractCache(anilistId, currentEp, currentType);
+          hideOverlay();
+          play(true, { deep: false });
+          return;
+        }
+
+        try { sessionStorage.removeItem(attemptKey); } catch {}
         showProviderError(provider, `Manifest did not load (${d.details})`);
         return;
       }
@@ -1641,6 +1694,7 @@ function loadHls(src, subs, referer, provider, rawUrl){
       clearStartupTimer(); hideOverlay();
       setStatus('Playing', 'playing');
       if (rawUrl) saveSticky(anilistId, currentEp, currentType, rawUrl, referer);
+      try { sessionStorage.removeItem(`adv:${anilistId}:${currentEp}:${currentType}`); } catch {}
       updateAudioTracks();
       video.removeEventListener('playing', onPlaying);
     };
