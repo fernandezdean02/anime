@@ -22,11 +22,36 @@
   <main>
     <div id="status">Loading…</div>
     <div id="grid" class="grid"></div>
+    <div id="sentinel" aria-hidden="true"></div>
+    <button id="load-more" hidden>Load more</button>
   </main>
+
+<style>
+  /* Extra styles for infinite scroll — safe to merge into styles.css */
+  #sentinel { height: 1px; width: 100%; }
+  #load-more {
+    display: block;
+    margin: 24px auto 40px;
+    padding: 12px 28px;
+    background: var(--elev, #1e1e28);
+    color: var(--text, #e0e0e8);
+    border: 1px solid var(--border, #2a2a35);
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: border-color .15s;
+  }
+  #load-more:hover { border-color: var(--accent, #7c5cff); }
+  #load-more:disabled { opacity: .5; cursor: not-allowed; }
+  #load-more[hidden] { display: none; }
+</style>
 
 <script>
 const $ = s => document.querySelector(s);
 const grid = $('#grid'), status = $('#status');
+const loadMoreBtn = $('#load-more');
+const sentinel = $('#sentinel');
 
 const PLACEHOLDER = "data:image/svg+xml;utf8," + encodeURIComponent(
   `<svg xmlns='http://www.w3.org/2000/svg' width='200' height='300'>
@@ -44,60 +69,159 @@ function setStatus(msg, err=false){
   status.classList.toggle('err', err);
 }
 
-function render(items){
-  if (!items || !items.length){ setStatus('No results.'); grid.innerHTML=''; return; }
-  setStatus(`${items.length} result${items.length>1?'s':''}`);
-  grid.innerHTML = items.map(a => {
-    const title = a.title?.english || a.title?.romaji || a.title?.native || 'Unknown';
-    const img = a.coverImage?.large || a.coverImage?.extraLarge || PLACEHOLDER;
-    const bits = [a.format, a.seasonYear, a.episodes ? a.episodes + ' ep' : null]
-      .filter(Boolean).join(' · ');
-    const score = a.averageScore ? `<span class="score">${a.averageScore}%</span>` : '';
-    return `<a class="card" href="./player.html?id=${a.id}">
-      <img loading="lazy" src="${esc(img)}" onerror="this.src='${PLACEHOLDER}'" alt="">
-      <div class="info">
-        <h3>${esc(title)}</h3>
-        <p>${esc(bits)}</p>
-        ${score}
-      </div>
-    </a>`;
-  }).join('');
+// ── pagination state ──
+let currentMode = { type: 'section', value: 'trending' };
+let currentPage = 0;
+let pageSize = null;       // items returned on page 1 — used to detect last page
+let isLoading = false;
+let hasMore = true;
+let currentAbort = null;   // AbortController for the in-flight request
+const seenIds = new Set(); // dedupe across pages
+
+function buildUrl(page) {
+  if (currentMode.type === 'search') {
+    return `/anime/search?query=${encodeURIComponent(currentMode.value)}&page=${page}`;
+  }
+  return `/anime/${currentMode.value}?page=${page}`;
 }
 
-async function search(q){
-  setStatus('Searching…'); grid.innerHTML='';
+function cardHTML(a) {
+  const title = a.title?.english || a.title?.romaji || a.title?.native || 'Unknown';
+  const img   = a.coverImage?.large || a.coverImage?.extraLarge || PLACEHOLDER;
+  const bits  = [a.format, a.seasonYear, a.episodes ? a.episodes + ' ep' : null]
+    .filter(Boolean).join(' · ');
+  const score = a.averageScore ? `<span class="score">${a.averageScore}%</span>` : '';
+  return `<a class="card" href="./player.html?id=${a.id}">
+    <img loading="lazy" src="${esc(img)}" onerror="this.src='${PLACEHOLDER}'" alt="">
+    <div class="info">
+      <h3>${esc(title)}</h3>
+      <p>${esc(bits)}</p>
+      ${score}
+    </div>
+  </a>`;
+}
+
+function appendItems(items) {
+  grid.insertAdjacentHTML('beforeend', items.map(cardHTML).join(''));
+}
+
+function resetList(mode) {
+  // Cancel any pending fetch so it can't append stale results
+  if (currentAbort) { try { currentAbort.abort(); } catch(_){} currentAbort = null; }
+  currentMode = mode;
+  currentPage = 0;
+  pageSize = null;
+  isLoading = false;
+  hasMore = true;
+  seenIds.clear();
+  grid.innerHTML = '';
+  loadMoreBtn.hidden = true;
+  loadMoreBtn.disabled = false;
+  setStatus('Loading…');
+}
+
+async function loadNext() {
+  if (isLoading || !hasMore) return;
+  isLoading = true;
+  loadMoreBtn.hidden = true;
+  loadMoreBtn.disabled = true;
+
+  const nextPage = currentPage + 1;
+  if (nextPage > 1) setStatus('Loading more…');
+
+  currentAbort = new AbortController();
+  const signal = currentAbort.signal;
+
   try {
-    const r = await fetch(`/anime/search?query=${encodeURIComponent(q)}`);
+    const r = await fetch(buildUrl(nextPage), { signal });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const d = await r.json();
-    render(d.results);
-  } catch(e){ setStatus('Search failed: ' + e.message, true); }
+    const items = Array.isArray(d) ? d : (d.results || d.data || []);
+
+    // Empty response → we've hit the end
+    if (!items.length) {
+      hasMore = false;
+      setStatus(currentPage === 0
+        ? 'No results.'
+        : `End of list · ${seenIds.size} total`);
+      return;
+    }
+
+    // Dedupe against what we already have
+    const fresh = items.filter(a => a.id && !seenIds.has(a.id));
+
+    // All-duplicate page → API doesn't support pagination (or we've looped back)
+    if (!fresh.length) {
+      hasMore = false;
+      setStatus(`End of list · ${seenIds.size} total`);
+      return;
+    }
+
+    // Track page size from the first page to detect the final (partial) page
+    if (nextPage === 1) pageSize = items.length;
+
+    fresh.forEach(a => seenIds.add(a.id));
+    appendItems(fresh);
+    currentPage = nextPage;
+    setStatus(`${seenIds.size} result${seenIds.size > 1 ? 's' : ''}`);
+
+    // If this page returned fewer than pageSize AND every item was new,
+    // it's almost certainly the last page.
+    if (pageSize && items.length < pageSize && fresh.length === items.length) {
+      hasMore = false;
+      setStatus(`End of list · ${seenIds.size} total`);
+      return;
+    }
+
+    // Show manual fallback button after the first page succeeds
+    if (currentPage > 0) loadMoreBtn.hidden = false;
+
+  } catch(e) {
+    if (e.name === 'AbortError') return; // reset was called — exit silently
+    setStatus('Failed: ' + e.message, true);
+    hasMore = false;
+  } finally {
+    isLoading = false;
+    loadMoreBtn.disabled = false;
+    if (hasMore && currentPage > 0) loadMoreBtn.hidden = false;
+  }
 }
 
-async function section(sec){
-  setStatus('Loading…'); grid.innerHTML='';
-  try {
-    const r = await fetch(`/anime/${sec}`);
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const d = await r.json();
-    render(Array.isArray(d) ? d : (d.results || d.data || []));
-  } catch(e){ setStatus('Failed: ' + e.message, true); }
+function startSection(sec) {
+  resetList({ type: 'section', value: sec });
+  loadNext();
 }
 
+function startSearch(q) {
+  resetList({ type: 'search', value: q });
+  loadNext();
+}
+
+// ── IntersectionObserver: auto-fetch when near bottom ──
+const observer = new IntersectionObserver((entries) => {
+  if (entries[0].isIntersecting) loadNext();
+}, { rootMargin: '400px 0px' });
+observer.observe(sentinel);
+
+// ── Manual fallback button ──
+loadMoreBtn.addEventListener('click', loadNext);
+
+// ── Search + tabs ──
 $('#search-form').addEventListener('submit', ev => {
   ev.preventDefault();
   const q = $('#q').value.trim();
-  if (q) search(q);
+  if (q) startSearch(q);
 });
 
 $('#tabs').addEventListener('click', ev => {
   const b = ev.target.closest('button[data-sec]');
   if (!b) return;
   [...$('#tabs').children].forEach(x => x.classList.toggle('active', x===b));
-  section(b.dataset.sec);
+  startSection(b.dataset.sec);
 });
 
-section('trending');
+// ── Initial load ──
+startSection('trending');
 </script>
 </body>
 </html>
