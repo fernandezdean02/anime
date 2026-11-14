@@ -39,6 +39,10 @@ except ImportError:
 
 log = logging.getLogger("uvicorn.error")
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+STATIC_DIR = os.path.join(BASE_DIR, "static")
+log.info(f"[startup] BASE_DIR={BASE_DIR} STATIC_DIR={STATIC_DIR} exists={os.path.isdir(STATIC_DIR)}")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -96,7 +100,7 @@ def _timeout_for(path: str) -> "float | None":
 
 
 # ═══════════════ persistent disk cache ═══════════════
-CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache")
+CACHE_DIR = os.path.join(BASE_DIR, ".cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
 CACHE_TTL = [
@@ -800,15 +804,28 @@ async def health():
         "cache_entries": n_cache,
         "recent_entries": len(_recent_load()),
         "force_httpx_mp4": FORCE_HTTPX_MP4,
+        "base_dir": BASE_DIR,
+        "static_dir": STATIC_DIR,
+        "static_exists": os.path.isdir(STATIC_DIR),
     }
 
 
-app.mount("/ui", StaticFiles(directory="static", html=True), name="static")
+# ═══════════════ static mount + root override ═══════════════
+if not os.path.isdir(STATIC_DIR):
+    log.error(f"[startup] STATIC_DIR missing: {STATIC_DIR} — static mount will fail")
+app.mount("/ui", StaticFiles(directory=STATIC_DIR, html=True), name="static")
 
-if not any(getattr(r, "path", None) == "/" for r in app.routes):
-    @app.get("/")
-    def _root():
-        return RedirectResponse(url="/ui/")
+# Remove any existing (Kuhi API) route for "/" so ours wins
+app.router.routes = [r for r in app.routes if getattr(r, "path", None) != "/"]
+
+@app.get("/")
+def _root_redirect():
+    return RedirectResponse(url="/ui/", status_code=302)
+
+@app.get("/player")
+def _player_shortcut():
+    return RedirectResponse(url="/ui/player.html", status_code=302)
+
 
 if __name__ == "__main__":
     import uvicorn
