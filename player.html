@@ -491,6 +491,9 @@ header .brand {
   scrollbar-color: rgba(124, 92, 255, 0.35) rgba(255, 255, 255, 0.03);
 }
 .ep-list button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   padding: 12px 4px;
   background: rgba(0, 0, 0, 0.4);
   border: 1px solid rgba(255, 255, 255, 0.06);
@@ -501,12 +504,10 @@ header .brand {
   cursor: pointer;
   transition: background-color 0.15s, border-color 0.15s, transform 0.1s;
   overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
   min-width: 0;
   font-variant-numeric: tabular-nums;
-  line-height: 1.2;
-  text-align: center;
+  line-height: 1;
   -webkit-tap-highlight-color: transparent;
 }
 .ep-list button:hover {
