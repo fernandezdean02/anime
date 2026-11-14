@@ -322,13 +322,6 @@ def _is_mp4_url(u: str) -> bool:
     return path.endswith(".mp4") or path.endswith(".m4v")
 
 
-def _is_media_segment(u: str) -> bool:
-    # Anything routed through /p/seg that isn't a manifest or subtitle
-    # is a media segment — including query-string URLs with no extension,
-    # .key files, .m4a audio, .fmp4 fragmented mp4, etc.
-    return not _is_m3u8_url(u) and not _is_ass_url(u)
-
-
 def _looks_like_mp4(data: bytes) -> bool:
     if len(data) < 12: return False
     return data[4:8] in (b'ftyp', b'moov', b'mdat', b'free', b'skip', b'wide', b'styp')
@@ -505,15 +498,25 @@ async def proxy_m3u8(request: Request, url: str, referer: "str | None" = None,
         return RedirectResponse(url=url, status_code=302)
     request_base = str(request.base_url).rstrip("/") if abs else None
 
+    # ═══ cffi path — validate m3u8 body before returning ═══
     if HAS_CFFI:
         body, ct, status, label, _hdrs = await _fetch_media_cffi(url, referer, overall_timeout=12.0)
         if body is not None:
+            text = body.decode("utf-8", "replace")
+            if not text.lstrip().startswith("#EXTM3U"):
+                snippet = text[:80].replace("\n", " ").strip()
+                log.warning(f"/p/m3u8 cffi returned non-m3u8 (starts={snippet!r}) url={url[:100]}")
+                return Response(
+                    content=f"upstream is not a valid m3u8 manifest: {snippet}".encode(),
+                    status_code=502, media_type="text/plain",
+                )
             return Response(
-                content=_rewrite_m3u8(body.decode("utf-8", "replace"), url, referer, request_base),
+                content=_rewrite_m3u8(text, url, referer, request_base),
                 media_type="application/vnd.apple.mpegurl",
             )
         log.warning(f"/p/m3u8 cffi failed ({label}), trying httpx")
 
+    # ═══ httpx fallback — same validation ═══
     try:
         r = await _fetch_small(url, referer)
     except Exception as e:
@@ -521,6 +524,13 @@ async def proxy_m3u8(request: Request, url: str, referer: "str | None" = None,
     if r.status_code != 200:
         return Response(content=r.content, status_code=r.status_code,
                         media_type=r.headers.get("content-type", "text/plain"))
+    if not r.text.lstrip().startswith("#EXTM3U"):
+        snippet = r.text[:80].replace("\n", " ").strip()
+        log.warning(f"/p/m3u8 httpx returned non-m3u8 (starts={snippet!r}) url={url[:100]}")
+        return Response(
+            content=f"upstream is not a valid m3u8 manifest: {snippet}".encode(),
+            status_code=502, media_type="text/plain",
+        )
     return Response(content=_rewrite_m3u8(r.text, url, referer, request_base),
                     media_type="application/vnd.apple.mpegurl")
 
@@ -781,6 +791,7 @@ async def health():
         "base_dir": BASE_DIR, "static_dir": STATIC_DIR,
         "static_exists": os.path.isdir(STATIC_DIR),
         "fast_segments": True,
+        "manifest_validation": True,
         "stream_client": _stream_client is not None and not _stream_client.is_closed,
     }
 
