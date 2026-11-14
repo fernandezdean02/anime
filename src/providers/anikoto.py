@@ -2,6 +2,7 @@ import asyncio
 import base64
 import json
 import re
+import time
 from urllib.parse import quote, urljoin, urlparse
 
 from src.providers import _cache
@@ -22,6 +23,17 @@ LANG_MAP = {
     "fr": "fr", "french": "fr", "de": "de", "german": "de",
     "es": "es", "spanish": "es", "pt": "pt", "portuguese": "pt",
 }
+
+# ─── Caches ────────────────────────────────────────────────────────────
+_SERIES_EP_CACHE: dict = {}      # slug -> (expires_at, episodes_list)
+_SERIES_EP_TTL = 600.0
+
+_WATCH_FAST_CACHE: dict = {}     # (anilistId, audio, ep) -> (expires_at, streams_list)
+_WATCH_FAST_TTL = 300.0
+_WATCH_NEG_TTL = 60.0
+
+_GET_EP_CACHE: dict = {}         # anilistId -> (expires_at, dict)
+_GET_EP_TTL = 600.0
 
 _SBOX = (
     0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b,
@@ -295,7 +307,6 @@ def _build_source_url(origin: str, path: str, file_id: str) -> str:
     base = origin.rstrip("/") + "/"
     url = urljoin(base, path.lstrip("/"))
     sep = "&" if "?" in url else "?"
-
     return url + sep + "id=" + quote(file_id, safe="") + "&id=" + quote(file_id, safe="")
 
 
@@ -438,6 +449,11 @@ def _data_attr(tag: str, name: str) -> str:
 
 
 async def scrape_series(slug: str) -> list:
+    now = time.time()
+    hit = _SERIES_EP_CACHE.get(slug)
+    if hit and hit[0] > now:
+        return hit[1]
+
     show_id = await _fetch_show_id(slug)
     data = await fetch_json(
         f"{BASE}/ajax/episode/list/{show_id}",
@@ -469,6 +485,7 @@ async def scrape_series(slug: str) -> list:
         if e["number"] not in seen:
             seen.add(e["number"])
             out.append(e)
+    _SERIES_EP_CACHE[slug] = (now + _SERIES_EP_TTL, out)
     return out
 
 
@@ -524,12 +541,17 @@ def _build_lists(anilist_id: int, series: dict, provider_eps: list, ctx: dict, e
 
 
 async def get_episodes(anilist_id: int, ctx: dict | None = None) -> dict:
+    now = time.time()
+    hit = _GET_EP_CACHE.get(int(anilist_id))
+    if hit and hit[0] > now:
+        return hit[1]
+
     ctx = ctx or await build_ctx(int(anilist_id))
     media = ctx["media"]
     series = await resolve_series(int(anilist_id), ctx)
     episodes = await scrape_series(series["slug"])
     expected = expected_count(media, ctx.get("anizip"))
-    return {
+    result = {
         "meta": {
             "id": series["slug"],
             "title": series["title"],
@@ -540,6 +562,8 @@ async def get_episodes(anilist_id: int, ctx: dict | None = None) -> dict:
         },
         "episodes": _build_lists(int(anilist_id), series, episodes, ctx, expected),
     }
+    _GET_EP_CACHE[int(anilist_id)] = (now + _GET_EP_TTL, result)
+    return result
 
 
 def _num(value):
@@ -676,7 +700,7 @@ async def _scrape_episode_watch(anilist_id: int, audio: str, ep_num: int, ctx: d
                         if s or e:
                             dest["start"], dest["end"] = s, e
             hls_sources = []
-            if "#aHR0c" in embed_url:
+            if "#aHR0" in embed_url:
                 frag = embed_url.split("#", 1)[1]
                 try:
                     decoded = base64.b64decode(frag + "=" * (-len(frag) % 4)).decode("utf-8", "errors")
@@ -775,8 +799,172 @@ async def _scrape_episode_watch(anilist_id: int, audio: str, ep_num: int, ctx: d
     return streams
 
 
+async def _fast_watch(anilist_id: int, audio: str, ep: int, ctx: dict) -> list:
+    """Fast-path watch for sub/dub. Returns AT MOST one HLS stream — the
+    first to resolve. Skips downloads, embed fallbacks, and 2nd+ HLS
+    sources. Designed for the race / player, not the browse-all UI."""
+    cache_key = (anilist_id, audio, ep)
+    now = time.time()
+    hit = _WATCH_FAST_CACHE.get(cache_key)
+    if hit and hit[0] > now:
+        return hit[1]
+
+    series = await resolve_series(anilist_id, ctx)
+    provider_ep = int(ep) + series["offset"] if series["mode"] == "offset" else int(ep)
+    show_id = series.get("show_id") or await _fetch_show_id(series["slug"])
+
+    list_json = await fetch_json(
+        f"{BASE}/ajax/episode/list/{show_id}",
+        {"X-Requested-With": "XMLHttpRequest", "Referer": f"{BASE}/watch/{series['slug']}"},
+    )
+    html = (list_json.get("result") if isinstance(list_json, dict) else None) or ""
+
+    target = None
+    for m in re.finditer(r"<a\s+[^>]*data-id=\"[^\"]*\"[^>]*>", html, re.IGNORECASE):
+        tag = m.group(0)
+        try:
+            num = int(_data_attr(tag, "num"))
+        except ValueError:
+            continue
+        if num == provider_ep:
+            target = {"ids": _data_attr(tag, "ids"), "mal": _data_attr(tag, "mal"),
+                      "slug": _data_attr(tag, "slug"), "timestamp": _data_attr(tag, "timestamp")}
+            break
+    if not target or not target["ids"]:
+        _WATCH_FAST_CACHE[cache_key] = (now + _WATCH_NEG_TTL, [])
+        return []
+
+    async def _servers():
+        try:
+            return await fetch_json(
+                f"{BASE}/ajax/server/list?servers={quote(target['ids'], safe='')}",
+                {"X-Requested-With": "XMLHttpRequest", "Referer": BASE + "/"},
+            )
+        except Exception:
+            return None
+
+    async def _mapper():
+        if target["mal"] and target["slug"] and target["timestamp"]:
+            try:
+                return await fetch_json(
+                    f"{MAPPER}/{target['mal']}/{target['slug']}/{target['timestamp']}",
+                    {"Referer": BASE + "/"},
+                )
+            except Exception:
+                return None
+        return None
+
+    server_data, mapper_data = await asyncio.gather(_servers(), _mapper())
+    server_html = (server_data.get("result") if isinstance(server_data, dict) else None) or ""
+
+    server_items, _downloads = _split_servers(server_html, audio)
+    _merge_mapper(mapper_data, audio, server_items, [])
+
+    seen_names = set()
+    unique_items = []
+    for item in server_items:
+        if item["name"] in seen_names:
+            continue
+        seen_names.add(item["name"])
+        unique_items.append(item)
+
+    if not unique_items:
+        _WATCH_FAST_CACHE[cache_key] = (now + _WATCH_NEG_TTL, [])
+        return []
+
+    async def _try_one(item):
+        try:
+            resolved = await _resolve_server_url(item["linkId"])
+            embed_url = (resolved.get("result") or {}).get("url") if isinstance(resolved, dict) else None
+            if not embed_url:
+                return None
+
+            if "#aHR0" in embed_url:
+                frag = embed_url.split("#", 1)[1]
+                try:
+                    decoded = base64.b64decode(frag + "=" * (-len(frag) % 4)).decode("utf-8", "errors")
+                    if ".m3u8" in decoded:
+                        try:
+                            p = urlparse(embed_url)
+                            origin = p.scheme + "://" + p.netloc + "/"
+                        except Exception:
+                            origin = BASE + "/"
+                        return {
+                            "url": decoded,
+                            "type": "hls",
+                            "server": item["name"],
+                            "audio": audio,
+                            "referer": origin,
+                            "subtitles": [],
+                            "priority": 5,
+                            "isActive": True,
+                        }
+                except Exception:
+                    pass
+
+            extracted = await _extract_megaplay_details(embed_url)
+            if not extracted or not extracted["sources"]:
+                return None
+
+            item_subs = []
+            for t in extracted["tracks"]:
+                if isinstance(t, dict):
+                    m = _map_track(t, item["name"])
+                    if m.get("url"):
+                        item_subs.append(m)
+
+            first = extracted["sources"][0]
+            return {
+                "url": first["url"],
+                "type": "hls",
+                "server": item["name"],
+                "audio": audio,
+                "referer": extracted["origin"] + "/",
+                "subtitles": item_subs,
+                "priority": 5,
+                "isActive": True,
+            }
+        except Exception:
+            return None
+
+    tasks = {asyncio.create_task(_try_one(item)): item for item in unique_items}
+    winner = None
+    try:
+        while tasks:
+            done, _ = await asyncio.wait(tasks.keys(), return_when=asyncio.FIRST_COMPLETED)
+            for t in done:
+                tasks.pop(t)
+                try:
+                    r = t.result()
+                except Exception:
+                    r = None
+                if r:
+                    winner = r
+                    break
+            if winner:
+                break
+    finally:
+        for t in tasks:
+            t.cancel()
+        for t in tasks:
+            try:
+                await t
+            except BaseException:
+                pass
+
+    if winner:
+        _WATCH_FAST_CACHE[cache_key] = (now + _WATCH_FAST_TTL, [winner])
+        return [winner]
+    _WATCH_FAST_CACHE[cache_key] = (now + _WATCH_NEG_TTL, [])
+    return []
+
+
 async def watch(anilist_id: int, audio: str, ep: int, ctx: dict | None = None) -> list:
     if audio not in ("sub", "dub", "all"):
         raise ValueError("audio must be sub, dub or all")
     ctx = ctx or await build_ctx(int(anilist_id))
+
+    if audio in ("sub", "dub"):
+        return await _fast_watch(int(anilist_id), audio, int(ep), ctx)
+
     return await _scrape_episode_watch(int(anilist_id), audio, int(ep), ctx)
