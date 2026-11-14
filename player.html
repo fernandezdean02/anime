@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#0a0a0f">
   <title>Player</title>
   <link rel="stylesheet" href="./styles.css">
   <script src="./hls.min.js"></script>
@@ -39,14 +40,21 @@
 
     <aside class="side">
       <div class="card">
-        <h3>Audio <span class="badge" id="audio-count">—</span></h3>
+        <h3>Audio <span class="badge empty" id="audio-count">—</span></h3>
         <select id="audio-select" class="track-select" disabled>
           <option>Loading…</option>
         </select>
       </div>
 
+      <div class="card" id="quality-card" hidden>
+        <h3>Quality <span class="badge empty" id="quality-count">—</span></h3>
+        <select id="quality-select" class="track-select" disabled>
+          <option value="-1">Auto</option>
+        </select>
+      </div>
+
       <div class="card" id="cc-section">
-        <h3>Captions <span class="badge" id="caption-count">—</span></h3>
+        <h3>Captions <span class="badge empty" id="caption-count">—</span></h3>
         <select id="caption-select" class="track-select">
           <option value="-1">Off</option>
         </select>
@@ -55,6 +63,20 @@
       <div class="card">
         <h3>Server</h3>
         <select id="provider-select" class="track-select"></select>
+      </div>
+
+      <div class="card">
+        <h3>Playback</h3>
+        <div class="slider-row">
+          <label for="volume-slider">Volume</label>
+          <input type="range" id="volume-slider" min="0" max="300" step="5" value="100">
+          <span class="slider-value" id="volume-value">100%</span>
+        </div>
+        <div class="slider-row">
+          <label for="brightness-slider">Brightness</label>
+          <input type="range" id="brightness-slider" min="30" max="200" step="5" value="100">
+          <span class="slider-value" id="brightness-value">100%</span>
+        </div>
       </div>
 
       <div class="card" id="vlc-section">
@@ -73,7 +95,10 @@
       </div>
 
       <div class="card episodes-card">
-        <h3>Episodes <span id="ep-source" class="ep-source"></span></h3>
+        <h3>
+          <span class="ep-title">Episodes</span>
+          <span id="ep-source" class="ep-source"></span>
+        </h3>
         <div class="ep-list" id="ep-list"><span class="hint">Loading…</span></div>
       </div>
 
@@ -95,12 +120,44 @@
   </div>
 
 <style>
-/* ═══════ PREMIUM THEME ═══════ */
+/* ═══════ DARK SCROLLBARS EVERYWHERE ═══════ */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(124, 92, 255, 0.35) rgba(255, 255, 255, 0.03);
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.02);
+  border-radius: 4px;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgba(124, 92, 255, 0.28);
+  border-radius: 4px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(124, 92, 255, 0.5);
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-corner { background: transparent; }
+
+/* Native form controls dark mode */
+select, input, textarea, button, option {
+  color-scheme: dark;
+}
+
+/* ═══════ THEME ═══════ */
 :root {
   --glow: rgba(124, 92, 255, 0.35);
   --glass: rgba(24, 24, 34, 0.72);
   --glass-border: rgba(255, 255, 255, 0.06);
 }
+
+html, body { margin: 0; }
 
 body {
   background:
@@ -108,6 +165,45 @@ body {
     radial-gradient(900px 500px at 100% 100%, #0d1a2e 0%, transparent 55%),
     var(--bg, #0a0a0f);
   background-attachment: fixed;
+  color: var(--text, #e0e0e8);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', system-ui, sans-serif;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--glass-border);
+  background: rgba(8, 8, 12, 0.72);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+header .back {
+  display: inline-flex; align-items: center; gap: 4px;
+  color: var(--text);
+  text-decoration: none;
+  font-size: 13px; font-weight: 600;
+  padding: 7px 12px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--glass-border);
+  transition: all .18s;
+}
+header .back:hover { border-color: var(--accent, #7c5cff); }
+header .brand {
+  flex: 1;
+  text-align: center;
+  font-size: 14px; font-weight: 700;
+  background: linear-gradient(135deg, var(--text) 20%, var(--accent, #7c5cff) 130%);
+  -webkit-background-clip: text; background-clip: text;
+  -webkit-text-fill-color: transparent;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
 .player-wrap {
@@ -123,7 +219,6 @@ body {
   .side { max-height: none; }
 }
 
-/* Video box */
 .video-box {
   position: relative;
   border-radius: 16px;
@@ -137,13 +232,12 @@ body {
 }
 .video-box video {
   display: block;
-  width: 100%;
-  height: 100%;
+  width: 100%; height: 100%;
   background: #000;
   object-fit: contain;
+  transition: filter .15s ease;
 }
 
-/* Meta strip */
 .meta {
   display: flex;
   gap: 14px;
@@ -155,22 +249,17 @@ body {
   backdrop-filter: blur(16px);
   border: 1px solid var(--glass-border);
 }
-
 .cover-wrap {
-  width: 66px;
-  height: 94px;
-  border-radius: 10px;
-  overflow: hidden;
+  width: 66px; height: 94px;
+  border-radius: 10px; overflow: hidden;
   flex-shrink: 0;
   background: linear-gradient(135deg, #1a1a26 0%, #252532 100%);
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4), inset 0 0 0 1px rgba(255,255,255,0.04);
 }
 .cover-wrap img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-  transition: opacity 0.3s ease;
+  width: 100%; height: 100%;
+  object-fit: cover; display: block;
+  transition: opacity .3s;
 }
 .cover-wrap img.loading { opacity: 0; }
 .cover-wrap img.placeholder { opacity: 0.35; }
@@ -182,8 +271,7 @@ body {
   line-height: 1.25;
   font-weight: 700;
   letter-spacing: -0.01em;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  overflow: hidden; text-overflow: ellipsis;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
@@ -192,8 +280,7 @@ body {
 .meta-pills { display: flex; gap: 6px; flex-wrap: wrap; }
 .meta-badge {
   padding: 3px 9px;
-  font-size: 10px;
-  font-weight: 700;
+  font-size: 10px; font-weight: 700;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.06);
   color: var(--muted);
@@ -201,34 +288,24 @@ body {
   text-transform: uppercase;
 }
 
-/* Status pill */
 .status-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
+  display: inline-flex; align-items: center; gap: 6px;
   padding: 3px 10px;
   border-radius: 999px;
-  font-size: 10px;
-  font-weight: 700;
+  font-size: 10px; font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
   background: rgba(255, 255, 255, 0.05);
   color: var(--muted);
   border: 1px solid rgba(255, 255, 255, 0.06);
 }
-.status-pill .dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: currentColor;
-}
+.status-pill .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .status-pill.playing { color: #10b981; background: rgba(16, 185, 129, 0.1); border-color: rgba(16, 185, 129, 0.25); }
 .status-pill.playing .dot { animation: pulse 1.8s ease-in-out infinite; box-shadow: 0 0 8px #10b981; }
 .status-pill.loading { color: #f59e0b; background: rgba(245, 158, 11, 0.1); border-color: rgba(245, 158, 11, 0.25); }
 .status-pill.error { color: #ef4444; background: rgba(239, 68, 68, 0.1); border-color: rgba(239, 68, 68, 0.25); }
 @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
 
-/* Sidebar */
 .side {
   display: flex;
   flex-direction: column;
@@ -236,24 +313,22 @@ body {
   max-height: calc(100vh - 100px);
   overflow-y: auto;
   padding-right: 4px;
-  scrollbar-width: thin;
 }
-.side::-webkit-scrollbar { width: 6px; }
-.side::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 3px; }
 
 .card {
   background: var(--glass);
   backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
   border: 1px solid var(--glass-border);
   border-radius: 14px;
   padding: 14px 16px;
   transition: border-color 0.2s;
 }
 .card:hover { border-color: rgba(124, 92, 255, 0.2); }
+.card[hidden] { display: none !important; }
 
 .card h3 {
-  font-size: 11px;
-  font-weight: 700;
+  font-size: 11px; font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--muted);
@@ -262,6 +337,7 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  min-width: 0;
 }
 .card h3 .badge {
   font-size: 10px;
@@ -279,11 +355,10 @@ body {
   color: var(--muted);
 }
 
-/* Dropdown selects — matches server list, dark bg */
 .track-select {
   width: 100%;
-  padding: 10px 12px;
-  background: rgba(0, 0, 0, 0.35);
+  padding: 10px 32px 10px 12px;
+  background-color: rgba(0, 0, 0, 0.4);
   border: 1px solid rgba(255, 255, 255, 0.06);
   border-radius: 10px;
   color: var(--text);
@@ -291,24 +366,82 @@ body {
   font-weight: 600;
   cursor: pointer;
   outline: none;
-  transition: border-color 0.15s, background 0.15s;
+  transition: border-color .15s, background-color .15s;
   -webkit-appearance: none;
   appearance: none;
   background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23a0a0b0' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>");
   background-repeat: no-repeat;
   background-position: right 12px center;
-  padding-right: 32px;
 }
-.track-select:hover:not(:disabled) { background-color: rgba(0, 0, 0, 0.45); }
+.track-select:hover:not(:disabled) { background-color: rgba(0, 0, 0, 0.55); }
 .track-select:focus { border-color: var(--accent, #7c5cff); box-shadow: 0 0 0 3px rgba(124, 92, 255, 0.12); }
-.track-select:disabled { opacity: 0.6; cursor: not-allowed; }
-.track-select option { background: #14141c; color: var(--text); }
+.track-select:disabled { opacity: 0.55; cursor: not-allowed; }
+.track-select option {
+  background: #14141c;
+  color: var(--text);
+  padding: 8px;
+}
 
-/* VLC section */
+/* Sliders */
+.slider-row {
+  display: grid;
+  grid-template-columns: 82px 1fr 48px;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+.slider-row:last-child { margin-bottom: 0; }
+.slider-row label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.slider-row input[type="range"] {
+  width: 100%;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
+  outline: none;
+  -webkit-appearance: none;
+  appearance: none;
+  cursor: pointer;
+  accent-color: var(--accent, #7c5cff);
+}
+.slider-row input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--accent, #7c5cff), var(--accent2, #a78bfa));
+  cursor: pointer;
+  box-shadow: 0 0 0 3px rgba(124, 92, 255, 0.18), 0 2px 8px rgba(124, 92, 255, 0.4);
+  transition: transform .12s;
+}
+.slider-row input[type="range"]::-webkit-slider-thumb:hover { transform: scale(1.15); }
+.slider-row input[type="range"]::-moz-range-thumb {
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--accent, #7c5cff), var(--accent2, #a78bfa));
+  cursor: pointer;
+  border: 0;
+  box-shadow: 0 0 0 3px rgba(124, 92, 255, 0.18);
+}
+.slider-value {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--accent2, #a78bfa);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* VLC */
 .vlc-url-input {
   width: 100%;
   padding: 9px 11px;
-  background: rgba(0, 0, 0, 0.35);
+  background: rgba(0, 0, 0, 0.4);
   border: 1px solid rgba(255, 255, 255, 0.06);
   border-radius: 9px;
   color: var(--text);
@@ -321,19 +454,27 @@ body {
 .vlc-url-input:focus { border-color: var(--accent, #7c5cff); box-shadow: 0 0 0 3px rgba(124, 92, 255, 0.12); }
 .vlc-url-input::placeholder { color: var(--muted); }
 
-.vlc-mode { display: flex; gap: 6px; margin-bottom: 10px; background: rgba(0, 0, 0, 0.25); border-radius: 8px; padding: 3px; }
+.vlc-mode {
+  display: flex; gap: 6px;
+  margin-bottom: 10px;
+  background: rgba(0, 0, 0, 0.28);
+  border-radius: 8px;
+  padding: 3px;
+}
 .vlc-mode label {
   flex: 1;
   display: flex; align-items: center; justify-content: center; gap: 6px;
   padding: 7px 10px;
   border-radius: 6px;
-  font-size: 11px;
-  font-weight: 600;
+  font-size: 11px; font-weight: 600;
   color: var(--muted);
   cursor: pointer;
-  transition: all 0.15s;
+  transition: all .15s;
 }
-.vlc-mode label:has(input:checked) { background: rgba(124, 92, 255, 0.15); color: var(--accent2, #a78bfa); }
+.vlc-mode label:has(input:checked) {
+  background: rgba(124, 92, 255, 0.15);
+  color: var(--accent2, #a78bfa);
+}
 .vlc-mode input { display: none; }
 
 .vlc-row { display: flex; gap: 8px; }
@@ -341,11 +482,10 @@ body {
   flex: 1;
   padding: 10px 12px;
   border-radius: 9px;
-  font-size: 12px;
-  font-weight: 700;
+  font-size: 12px; font-weight: 700;
   cursor: pointer;
   border: 1px solid rgba(255, 255, 255, 0.08);
-  transition: all 0.15s;
+  transition: all .15s;
 }
 .btn-ghost { background: rgba(255, 255, 255, 0.04); color: var(--text); }
 .btn-ghost:hover:not(:disabled) { background: rgba(255, 255, 255, 0.08); }
@@ -355,22 +495,48 @@ body {
   border-color: transparent;
   box-shadow: 0 3px 10px var(--glow);
 }
-.btn-accent:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 5px 16px var(--glow); }
+.btn-accent:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 5px 16px var(--glow);
+}
 .btn-ghost:disabled, .btn-accent:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* Episodes */
 .episodes-card { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-.ep-source { font-size: 9px; color: var(--muted); text-transform: none; font-weight: 500; letter-spacing: 0; }
+.episodes-card h3 {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: nowrap;
+  min-width: 0;
+}
+.episodes-card h3 .ep-title {
+  flex-shrink: 0;
+}
+.ep-source {
+  flex: 1;
+  min-width: 0;
+  font-size: 9px;
+  color: var(--muted);
+  text-transform: none;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .ep-list {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(38px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(46px, 1fr));
   gap: 5px;
   overflow-y: auto;
   max-height: 260px;
   padding-right: 2px;
 }
 .ep-list button {
-  padding: 8px 4px;
+  padding: 8px 2px;
   background: rgba(255, 255, 255, 0.03);
   border: 1px solid rgba(255, 255, 255, 0.05);
   color: var(--text);
@@ -378,7 +544,11 @@ body {
   font-size: 11px;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.12s;
+  transition: all .12s;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
 }
 .ep-list button:hover { background: rgba(124, 92, 255, 0.08); border-color: rgba(124, 92, 255, 0.25); }
 .ep-list button.active {
@@ -388,7 +558,6 @@ body {
   box-shadow: 0 2px 8px var(--glow);
 }
 
-/* Retry */
 .retry {
   width: 100%;
   padding: 12px;
@@ -396,16 +565,14 @@ body {
   border: 1px solid rgba(255, 255, 255, 0.08);
   color: var(--text);
   border-radius: 11px;
-  font-size: 13px;
-  font-weight: 700;
+  font-size: 13px; font-weight: 700;
   cursor: pointer;
-  transition: all 0.15s;
+  transition: all .15s;
 }
 .retry:hover { background: rgba(124, 92, 255, 0.08); border-color: rgba(124, 92, 255, 0.3); color: var(--accent2, #a78bfa); }
 
 .hint { font-size: 11px; color: var(--muted); line-height: 1.5; }
 
-/* Overlay */
 .overlay {
   display: flex;
   flex-direction: column;
@@ -413,7 +580,7 @@ body {
   justify-content: center;
   gap: 12px;
   backdrop-filter: blur(12px);
-  background: rgba(10, 10, 15, 0.75);
+  background: rgba(10, 10, 15, 0.78);
   font-size: 14px;
   font-weight: 500;
   padding: 24px;
@@ -422,24 +589,62 @@ body {
 .overlay.hidden { display: none !important; }
 .overlay button { pointer-events: auto !important; cursor: pointer; }
 
-/* Dev log */
-#log-toggle{position:fixed;bottom:16px;right:16px;z-index:9999;width:48px;height:48px;border-radius:50%;background:linear-gradient(135deg,var(--accent,#7c5cff),var(--accent2,#a78bfa));color:#fff;border:0;font-size:20px;cursor:pointer;box-shadow:0 4px 16px var(--glow)}
-#log-toggle:hover{transform:translateY(-1px);box-shadow:0 6px 20px var(--glow)}
-#log-panel{display:none;position:fixed;bottom:76px;right:16px;z-index:9999;width:min(560px,calc(100vw - 32px));max-height:60vh;background:rgba(13,13,18,0.95);backdrop-filter:blur(20px);border:1px solid var(--glass-border);border-radius:14px;flex-direction:column;box-shadow:0 8px 32px rgba(0,0,0,.6)}
-#log-panel.open{display:flex}
-#log-header{display:flex;gap:6px;align-items:center;padding:12px 14px;border-bottom:1px solid var(--glass-border);font-size:13px}
-#log-header button{padding:4px 10px;background:rgba(255,255,255,0.06);color:var(--text);border:1px solid var(--glass-border);border-radius:6px;cursor:pointer;font-size:12px}
-#log-header button:hover{border-color:var(--accent,#7c5cff)}
-#log-content{flex:1;overflow:auto;padding:10px 14px;font:11px/1.5 ui-monospace,Monaco,Consolas,monospace;color:#c8c8d0;white-space:pre-wrap;word-break:break-all;margin:0;max-height:calc(60vh - 48px)}
-
 @keyframes spin { to { transform: rotate(360deg); } }
 .spinner {
-  width: 32px;
-  height: 32px;
+  width: 32px; height: 32px;
   border: 3px solid rgba(255, 255, 255, 0.1);
   border-top-color: var(--accent, #7c5cff);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
+}
+
+#log-toggle {
+  position: fixed; bottom: 16px; right: 16px; z-index: 9999;
+  width: 48px; height: 48px; border-radius: 50%;
+  background: linear-gradient(135deg, var(--accent, #7c5cff), var(--accent2, #a78bfa));
+  color: #fff; border: 0; font-size: 20px; cursor: pointer;
+  box-shadow: 0 4px 16px var(--glow);
+}
+#log-toggle:hover { transform: translateY(-1px); box-shadow: 0 6px 20px var(--glow); }
+#log-panel {
+  display: none;
+  position: fixed; bottom: 76px; right: 16px; z-index: 9999;
+  width: min(560px, calc(100vw - 32px));
+  max-height: 60vh;
+  background: rgba(13, 13, 18, 0.95);
+  backdrop-filter: blur(20px);
+  border: 1px solid var(--glass-border);
+  border-radius: 14px;
+  flex-direction: column;
+  box-shadow: 0 8px 32px rgba(0,0,0,.6);
+}
+#log-panel.open { display: flex; }
+#log-header {
+  display: flex; gap: 6px; align-items: center;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--glass-border);
+  font-size: 13px;
+}
+#log-header button {
+  padding: 4px 10px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+  border: 1px solid var(--glass-border);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+}
+#log-header button:hover { border-color: var(--accent, #7c5cff); }
+#log-content {
+  flex: 1;
+  overflow: auto;
+  padding: 10px 14px;
+  font: 11px/1.5 ui-monospace, Monaco, Consolas, monospace;
+  color: #c8c8d0;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0;
+  max-height: calc(60vh - 48px);
 }
 </style>
 
@@ -509,9 +714,8 @@ $('#log-copy').addEventListener('click', async () => {
 });
 // ---------------- END DEV LOG ----------------
 
-// ---------------- PROVIDER SELECTION ----------------
-const ALL_PROVIDERS = ['kaa', 'anizone', 'aniwaves', 'anineko',
-                       'animeonsen', 'anikoto', 'mkissa', 'animegg'];
+// ---------------- PROVIDERS ----------------
+const ALL_PROVIDERS = ['kaa', 'anizone', 'aniwaves', 'anineko', 'animeonsen', 'anikoto', 'mkissa', 'animegg'];
 const PROVIDER_LIST = [...new Set(ALL_PROVIDERS)];
 const DEFAULT_PROVIDER = 'anizone';
 const PROVIDER_STORAGE_KEY = 'provider-pref';
@@ -546,7 +750,7 @@ document.getElementById('provider-select').addEventListener('change', (e) => {
   addLog('WARN', `server → ${currentProvider}`);
   play(true, { deep: false });
 });
-// ---------------- END PROVIDER SELECTION ----------------
+// ---------------- END PROVIDERS ----------------
 
 const PLACEHOLDER = "data:image/svg+xml;utf8," + encodeURIComponent(
   `<svg xmlns='http://www.w3.org/2000/svg' width='200' height='300'>
@@ -558,7 +762,6 @@ const EXTRACT_TIMEOUT_MS   = 105000;
 const FULL_RACE_TIMEOUT_MS = 105000;
 const DEEP_RACE_TIMEOUT_MS = 200000;
 const STARTUP_TIMEOUT_MS   = 45000;
-
 const EPS_TTL_MS     = 2 * 60 * 60 * 1000;
 const EXTRACT_TTL_MS = 5 * 60 * 1000;
 const STICKY_TTL_MS  = 6 * 60 * 60 * 1000;
@@ -580,6 +783,11 @@ let currentSubsReferer = null;
 let currentStream = { url: '', referer: '', kind: 'hls', provider: '' };
 let currentCaptionTrack = -1;
 
+// Audio graph for volume boost
+let audioCtx = null;
+let audioSourceNode = null;
+let audioGainNode = null;
+
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
 
 // ---------------- STATUS ----------------
@@ -597,23 +805,116 @@ function setMetaBadge(id, text){
 }
 // ---------------- END STATUS ----------------
 
+// ---------------- AUDIO GRAPH / VOLUME / BRIGHTNESS ----------------
+function ensureAudioGraph(){
+  if (audioCtx) return true;
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return false;
+    audioCtx = new Ctx();
+    audioSourceNode = audioCtx.createMediaElementSource(video);
+    audioGainNode = audioCtx.createGain();
+    audioGainNode.gain.value = 1.0;
+    audioSourceNode.connect(audioGainNode);
+    audioGainNode.connect(audioCtx.destination);
+    addLog('INFO', 'audio graph created');
+    return true;
+  } catch(e){
+    addLog('WARN', `audio graph failed: ${e.message}`);
+    audioCtx = null;
+    return false;
+  }
+}
+
+function applyVolume(pct){
+  const clamped = Math.max(0, Math.min(300, pct));
+  if (clamped === 0){
+    video.muted = true;
+    video.volume = 0;
+    if (audioGainNode) audioGainNode.gain.value = 0;
+    return;
+  }
+  video.muted = false;
+
+  if (clamped <= 100 && !audioCtx){
+    video.volume = clamped / 100;
+    return;
+  }
+  if (!ensureAudioGraph()){
+    video.volume = Math.min(1, clamped / 100);
+    return;
+  }
+  if (audioCtx.state === 'suspended'){
+    audioCtx.resume().catch(()=>{});
+  }
+  video.volume = 1.0;
+  audioGainNode.gain.value = clamped / 100;
+}
+
+function applyBrightness(pct){
+  const b = Math.max(30, Math.min(200, pct));
+  video.style.filter = b === 100 ? '' : `brightness(${b/100})`;
+  try { localStorage.setItem('player-brightness', String(b)); } catch {}
+}
+
+const volumeSlider = document.getElementById('volume-slider');
+const volumeValue  = document.getElementById('volume-value');
+const brightnessSlider = document.getElementById('brightness-slider');
+const brightnessValue  = document.getElementById('brightness-value');
+
+// Restore saved values
+try {
+  const savedVol = parseInt(localStorage.getItem('player-volume') || '100', 10);
+  if (Number.isFinite(savedVol) && savedVol >= 0 && savedVol <= 300){
+    volumeSlider.value = String(savedVol);
+    volumeValue.textContent = savedVol + '%';
+    if (savedVol !== 100) applyVolume(savedVol);
+  }
+  const savedBright = parseInt(localStorage.getItem('player-brightness') || '100', 10);
+  if (Number.isFinite(savedBright) && savedBright >= 30 && savedBright <= 200){
+    brightnessSlider.value = String(savedBright);
+    brightnessValue.textContent = savedBright + '%';
+    applyBrightness(savedBright);
+  }
+} catch {}
+
+volumeSlider.addEventListener('input', (e) => {
+  const v = parseInt(e.target.value, 10);
+  volumeValue.textContent = v + '%';
+  applyVolume(v);
+  try { localStorage.setItem('player-volume', String(v)); } catch {}
+});
+
+brightnessSlider.addEventListener('input', (e) => {
+  const b = parseInt(e.target.value, 10);
+  brightnessValue.textContent = b + '%';
+  applyBrightness(b);
+});
+
+// Resume audio ctx on first user gesture (autoplay policy)
+document.addEventListener('click', () => {
+  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume().catch(()=>{});
+}, { once: false });
+// ---------------- END AUDIO/BRIGHTNESS ----------------
+
 // ---------------- TRACK CONTROLS ----------------
 function resetTrackControls(){
   const audioSel = document.getElementById('audio-select');
   const audioCount = document.getElementById('audio-count');
-  if (audioSel){
-    audioSel.innerHTML = '<option>Loading…</option>';
-    audioSel.disabled = true;
-  }
+  if (audioSel){ audioSel.innerHTML = '<option>Loading…</option>'; audioSel.disabled = true; }
   if (audioCount){ audioCount.textContent = '—'; audioCount.classList.add('empty'); }
 
   const capSel = document.getElementById('caption-select');
   const capCount = document.getElementById('caption-count');
-  if (capSel){
-    capSel.innerHTML = '<option value="-1">Off</option>';
-    capSel.value = '-1';
-  }
-  if (capCount){ capCount.textContent = '0'; capCount.classList.add('empty'); }
+  if (capSel){ capSel.innerHTML = '<option value="-1">Off</option>'; capSel.value = '-1'; }
+  if (capCount){ capCount.textContent = '—'; capCount.classList.add('empty'); }
+
+  const qCard = document.getElementById('quality-card');
+  const qSel = document.getElementById('quality-select');
+  const qCount = document.getElementById('quality-count');
+  if (qCard) qCard.hidden = true;
+  if (qSel){ qSel.innerHTML = '<option value="-1">Auto</option>'; qSel.value = '-1'; qSel.disabled = true; }
+  if (qCount){ qCount.textContent = '—'; qCount.classList.add('empty'); }
 
   currentCaptionTrack = -1;
   currentSubs = [];
@@ -623,12 +924,9 @@ function updateAudioTracks(){
   const select = document.getElementById('audio-select');
   const countEl = document.getElementById('audio-count');
   if (!select) return;
-
   const tracks = (hls && Array.isArray(hls.audioTracks)) ? hls.audioTracks : [];
-
   if (!tracks.length){
     if (currentStream && currentStream.url){
-      // Single-track stream (mp4 or HLS with only one audio)
       select.innerHTML = '<option value="0">Original</option>';
       select.value = '0';
       select.disabled = true;
@@ -640,7 +938,6 @@ function updateAudioTracks(){
     }
     return;
   }
-
   const currentIdx = typeof hls.audioTrack === 'number' ? hls.audioTrack : 0;
   select.innerHTML = tracks.map((t, i) => {
     const name = t.name || t.lang || `Track ${i + 1}`;
@@ -663,9 +960,7 @@ function updateCaptionTracks(){
   const select = document.getElementById('caption-select');
   const countEl = document.getElementById('caption-count');
   if (!select) return;
-
   const subs = currentSubs || [];
-
   if (!subs.length){
     select.innerHTML = '<option value="-1">Off</option>';
     select.value = '-1';
@@ -673,13 +968,11 @@ function updateCaptionTracks(){
     if (countEl){ countEl.textContent = '0'; countEl.classList.add('empty'); }
     return;
   }
-
-  select.innerHTML = '<option value="-1">Off</option>' +
-    subs.map((s, i) => {
-      const label = s.label || s.srclang || `Track ${i + 1}`;
-      const lang = s.srclang && s.label && s.label !== s.srclang ? ` · ${s.srclang}` : '';
-      return `<option value="${i}"${i === currentCaptionTrack ? ' selected' : ''}>${esc(label + lang)}</option>`;
-    }).join('');
+  select.innerHTML = '<option value="-1">Off</option>' + subs.map((s, i) => {
+    const label = s.label || s.srclang || `Track ${i + 1}`;
+    const lang = s.srclang && s.label && s.label !== s.srclang ? ` · ${s.srclang}` : '';
+    return `<option value="${i}"${i === currentCaptionTrack ? ' selected' : ''}>${esc(label + lang)}</option>`;
+  }).join('');
   select.disabled = false;
   if (countEl){ countEl.textContent = String(subs.length); countEl.classList.remove('empty'); }
 }
@@ -687,10 +980,7 @@ function updateCaptionTracks(){
 function applyCaptionTrack(idx){
   [...video.querySelectorAll('track')].forEach(t => t.remove());
   currentCaptionTrack = idx;
-  if (idx === -1){
-    addLog('INFO', 'captions off');
-    return;
-  }
+  if (idx === -1){ addLog('INFO', 'captions off'); return; }
   const s = currentSubs[idx];
   if (!s){ addLog('WARN', `caption ${idx} missing`); return; }
   addLog('INFO', `captions → ${s.label || s.srclang || idx}`);
@@ -710,9 +1000,64 @@ function applyCaptionTrack(idx){
 document.getElementById('caption-select').addEventListener('change', (e) => {
   applyCaptionTrack(parseInt(e.target.value, 10));
 });
-// ---------------- END TRACK CONTROLS ----------------
 
-// ---------------- VLC INTEGRATION ----------------
+// ---------------- QUALITY ----------------
+function populateQualityDropdown(){
+  const card = document.getElementById('quality-card');
+  const sel = document.getElementById('quality-select');
+  const countEl = document.getElementById('quality-count');
+  if (!sel) return;
+
+  const levels = (hls && Array.isArray(hls.levels)) ? hls.levels : [];
+  if (!levels.length){
+    if (card) card.hidden = true;
+    if (countEl){ countEl.textContent = '—'; countEl.classList.add('empty'); }
+    return;
+  }
+
+  // Dedupe by height (pick highest bitrate per height)
+  const byHeight = new Map();
+  levels.forEach((l, i) => {
+    const h = l.height || 0;
+    if (h <= 0) return;
+    const existing = byHeight.get(h);
+    if (!existing || (existing.bitrate < (l.bitrate || 0))){
+      byHeight.set(h, { i, h, bitrate: l.bitrate || 0 });
+    }
+  });
+  const sorted = [...byHeight.values()].sort((a, b) => b.h - a.h);
+
+  if (!sorted.length){
+    if (card) card.hidden = true;
+    return;
+  }
+
+  if (card) card.hidden = false;
+  const current = hls.autoLevelEnabled ? -1 : hls.currentLevel;
+  let html = `<option value="-1"${current === -1 ? ' selected' : ''}>Auto</option>`;
+  sorted.forEach(lv => {
+    html += `<option value="${lv.i}"${lv.i === current ? ' selected' : ''}>${lv.h}p</option>`;
+  });
+  sel.innerHTML = html;
+  sel.disabled = false;
+  if (countEl){ countEl.textContent = String(sorted.length + 1); countEl.classList.remove('empty'); }
+}
+
+document.getElementById('quality-select').addEventListener('change', (e) => {
+  if (!hls) return;
+  const v = parseInt(e.target.value, 10);
+  if (v === -1){
+    hls.currentLevel = -1;
+    hls.nextLevel = -1;
+    addLog('INFO', 'quality → auto');
+  } else {
+    hls.currentLevel = v;
+    addLog('INFO', `quality → ${hls.levels[v]?.height || '?'}p`);
+  }
+});
+// ---------------- END QUALITY ----------------
+
+// ---------------- VLC ----------------
 function vlcUrlInputEl(){ return document.getElementById('vlc-url-input'); }
 function vlcMode(){
   const el = document.querySelector('input[name="vlc-mode"]:checked');
@@ -727,7 +1072,6 @@ function vlcProxyUrl(){
   return `${location.origin}/p/m3u8?url=${u}${r}&abs=1`;
 }
 function vlcUrl(){ return vlcMode() === 'proxy' ? vlcProxyUrl() : vlcRawUrl(); }
-
 function updateVlcHint(){
   const hint = document.getElementById('vlc-hint');
   if (!hint) return;
@@ -749,7 +1093,6 @@ function clearVlcStream(){
   if (inp) inp.value = '';
   updateVlcHint();
 }
-
 (function bindVlcInput(){
   const inp = vlcUrlInputEl();
   if (!inp) return;
@@ -776,7 +1119,7 @@ async function copyToClipboard(text){
 
 async function copyVlcLink(){
   const link = vlcUrl();
-  if (!link){ addLog('WARN', 'no VLC link available'); return; }
+  if (!link){ addLog('WARN', 'no VLC link'); return; }
   const btn = document.getElementById('vlc-copy');
   const ok = await copyToClipboard(link);
   if (ok){
@@ -790,7 +1133,6 @@ async function copyVlcLink(){
 
 async function openInVlc(){
   if (!currentStream.url){
-    addLog('WARN', 'no URL');
     window.alert('No stream URL yet. Wait for extract, or paste a URL into the field above.');
     return;
   }
@@ -802,29 +1144,25 @@ async function openInVlc(){
     const u = encodeURIComponent(currentStream.url);
     const r = currentStream.referer ? `&referer=${encodeURIComponent(currentStream.referer)}` : '';
     const resp = await fetch(`/open?url=${u}${r}&kind=${currentStream.kind}&mode=${mode}`);
-
     if (!resp.ok){
       const txt = await resp.text().catch(() => '');
       const link = vlcUrl();
       const copied = link ? await copyToClipboard(link) : false;
-      addLog('ERROR', `VLC launch failed [${mode}]: HTTP ${resp.status} — copied=${copied}`);
-
+      addLog('ERROR', `VLC launch failed: HTTP ${resp.status} — copied=${copied}`);
       const msg = copied
-        ? `VLC couldn't be launched automatically (${resp.status}).\n\n✓ The URL has been copied to your clipboard.\n\nOpen VLC → Menu (☰) → New stream → Paste → Play.\n\n${txt.slice(0, 200)}`
+        ? `VLC couldn't be launched automatically (${resp.status}).\n\n✓ URL copied to clipboard.\n\nOpen VLC → Menu (☰) → New stream → Paste → Play.\n\n${txt.slice(0, 200)}`
         : `VLC couldn't be launched (${resp.status}).\n\nCopy the URL manually:\n${link || ''}\n\n${txt.slice(0, 200)}`;
       window.alert(msg);
       return;
     }
     const j = await resp.json().catch(() => ({}));
     addLog('OK', `VLC open [${mode}] → ${(j.target || '').slice(0, 100)}`);
-    if (btn){ btn.textContent = '✓ Sent to VLC'; }
+    if (btn) btn.textContent = '✓ Sent to VLC';
   } catch(e){
     addLog('ERROR', `VLC launch error: ${e.message}`);
     window.alert('VLC launch error: ' + e.message);
   } finally {
-    if (btn){
-      setTimeout(() => { btn.disabled = false; btn.textContent = orig || '▶ Open in VLC'; }, 1500);
-    }
+    if (btn) setTimeout(() => { btn.disabled = false; btn.textContent = orig || '▶ Open in VLC'; }, 1500);
   }
 }
 document.getElementById('vlc-copy').addEventListener('click', copyVlcLink);
@@ -848,7 +1186,6 @@ function cacheExtract(id, ep, type, data){
 function clearExtractCache(id, ep, type){
   try { sessionStorage.removeItem(extractKey(id, ep, type)); } catch {}
 }
-
 function getSticky(id, ep, type){
   try {
     const raw = localStorage.getItem(stickyKey(id, ep, type));
@@ -879,9 +1216,7 @@ async function tryProvider(ep, type, provider, nc){
     const stream = (data.streams || []).find(s => s.isActive !== false);
     if (!stream){ addLog('WARN', `${provider}: empty streams`); return null; }
     if (isEmbedStream(stream)){ addLog('WARN', `${provider}: embed only`); return null; }
-    if (!isHlsStream(stream) && !isMp4Stream(stream)){
-      addLog('WARN', `${provider}: unknown "${stream.type}"`); return null;
-    }
+    if (!isHlsStream(stream) && !isMp4Stream(stream)){ addLog('WARN', `${provider}: unknown "${stream.type}"`); return null; }
     addLog('OK', `✓ ${provider} → ${stream.type || 'hls'}`);
     return data;
   } catch(e){
@@ -903,18 +1238,14 @@ async function fullRace(ep, type, { deep = false, nocache = false } = {}){
 
 async function extractFast(ep, type, { silent = false, nocache = false, deep = false } = {}){
   const cached = !nocache && getCachedExtract(anilistId, ep, type);
-  if (cached){ addLog('INFO', `extract ep=${ep} [cache hit] provider=${cached.provider}`); return cached; }
+  if (cached){ addLog('INFO', `extract ep=${ep} [cache hit]`); return cached; }
   if (silent) return null;
-
   const nc = nocache ? '&nocache=1' : '';
   const provider = currentProvider;
   addLog('INFO', `using server: ${provider}`);
   const data = await tryProvider(ep, type, provider, nc);
   if (data){ cacheExtract(anilistId, ep, type, data); return data; }
-
-  if (provider !== DEFAULT_PROVIDER){
-    throw new Error(`Server "${provider}" has no playable stream. Pick another server.`);
-  }
+  if (provider !== DEFAULT_PROVIDER) throw new Error(`Server "${provider}" has no playable stream.`);
   addLog('WARN', `${provider} empty — full race`);
   const raceData = await fullRace(ep, type, { deep, nocache });
   if (!raceData.streams?.length) throw new Error('No streams from any provider');
@@ -947,7 +1278,6 @@ function getCachedEpisodes(id){
 function cacheEpisodes(id, data){
   try { sessionStorage.setItem(epsKey(id), JSON.stringify({ data, ts: Date.now() })); } catch {}
 }
-
 function episodesFor(type){
   if (episodes?.providers){
     for (const key of Object.keys(episodes.providers)){
@@ -958,7 +1288,6 @@ function episodesFor(type){
   if (fakeEpisodes) return fakeEpisodes;
   return [];
 }
-
 function renderEpisodes(){
   const list = episodesFor(currentType);
   if (!list.length){
@@ -966,19 +1295,17 @@ function renderEpisodes(){
     return;
   }
   epList.innerHTML = list.map(e =>
-    `<button data-ep="${e.number}" class="${e.number===currentEp?'active':''}">${e.number}</button>`
+    `<button data-ep="${e.number}" class="${e.number===currentEp?'active':''}" title="Episode ${e.number}">${e.number}</button>`
   ).join('');
   const active = epList.querySelector('button.active');
   if (active) active.scrollIntoView({ block: 'nearest' });
-  epSource.textContent = episodes ? '' : '(estimated)';
+  epSource.textContent = episodes ? '' : 'estimated';
 }
-
 function pickFallbackEp(type){
   const list = episodesFor(type);
   if (!list.length) return null;
   return list.some(e => e.number===currentEp) ? currentEp : list[0].number;
 }
-
 async function loadEpisodesBackground(){
   const cached = getCachedEpisodes(anilistId);
   if (cached){
@@ -1003,7 +1330,6 @@ async function loadEpisodesBackground(){
   }
 }
 
-// ---------------- ATTACH SUBTITLES ----------------
 function attachSubtitles(subs, referer){
   [...video.querySelectorAll('track')].forEach(t => t.remove());
   currentSubs = subs || [];
@@ -1017,7 +1343,7 @@ function clearStartupTimer(){
   if (startupTimer){ clearTimeout(startupTimer); startupTimer = null; }
 }
 
-// ---------------- OVERLAY ----------------
+// ---------------- OVERLAY (VLC button removed) ----------------
 function showOverlay(msg, err=false, timerPrefix=null){
   overlay.innerHTML = '';
   overlay.classList.toggle('err', err);
@@ -1045,15 +1371,7 @@ function showOverlay(msg, err=false, timerPrefix=null){
       overlay.appendChild(text);
     }
   }
-
-  if (!err && currentStream && currentStream.url){
-    const btn = document.createElement('button');
-    btn.textContent = '▶ Open in VLC (faster)';
-    btn.className = 'btn-accent';
-    btn.style.cssText = 'margin-top:16px;padding:12px 24px;max-width:280px;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer';
-    btn.addEventListener('click', (e) => { e.stopPropagation(); openInVlc(); });
-    overlay.appendChild(btn);
-  }
+  // (VLC shortcut removed — sidebar handles it)
 }
 function hideOverlay(){
   if (overlayTimer){ clearInterval(overlayTimer); overlayTimer = null; }
@@ -1101,7 +1419,7 @@ function playFromData(data){
 
   const subs = stream.subtitles || data.subtitles || [];
   const provider = data.provider || currentProvider;
-  addLog('INFO', `stream: provider=${provider} type=${stream.type || 'hls'} subs=${subs.length}`);
+  addLog('INFO', `stream: ${provider} ${stream.type || 'hls'} subs=${subs.length}`);
 
   if (isEmbedStream(stream)){ showProviderError(provider, 'returned embed, not playable'); return; }
 
@@ -1218,15 +1536,12 @@ function showProviderError(provider, reason){
   });
 }
 
-// ---------------- VIDEO ELEMENT ERRORS ----------------
 video.addEventListener('error', () => {
   if (!video.error) return;
   const codes = { 1: 'Aborted', 2: 'Network error', 3: 'Decode error', 4: 'Format not supported' };
   const msg = codes[video.error.code] || `Error ${video.error.code}`;
   addLog('ERROR', `video.error: ${msg}`);
-  if (video.readyState === 0){
-    showProviderError(currentProvider, msg);
-  }
+  if (video.readyState === 0) showProviderError(currentProvider, msg);
 });
 
 // ---------------- MP4 ----------------
@@ -1239,9 +1554,7 @@ function loadMp4(stream, subs, provider){
   video.load();
 
   startupTimer = setTimeout(() => {
-    if (video.readyState < 2){
-      showProviderError(provider, 'MP4 source did not start');
-    }
+    if (video.readyState < 2) showProviderError(provider, 'MP4 source did not start');
   }, 15000);
 
   const onPlaying = () => {
@@ -1252,7 +1565,6 @@ function loadMp4(stream, subs, provider){
     video.removeEventListener('playing', onPlaying);
   };
   video.addEventListener('playing', onPlaying);
-
   video.play().catch(()=>{});
 }
 
@@ -1265,12 +1577,10 @@ function loadHls(src, subs, referer, provider, rawUrl){
 
   if (window.Hls && Hls.isSupported()){
     hls = new Hls({
-      // Core
       enableWorker: true,
       lowLatencyMode: false,
       debug: false,
 
-      // Adaptive bitrate — auto (no forcing, no capping)
       startLevel: -1,
       testBandwidth: false,
       startFragPrefetch: true,
@@ -1278,39 +1588,32 @@ function loadHls(src, subs, referer, provider, rawUrl){
       abrBandWidthFactor: 0.95,
       abrBandWidthUpFactor: 0.75,
 
-      // Buffering — generous for slow mobile networks
       maxBufferLength: 30,
       maxMaxBufferLength: 60,
       maxBufferSize: 60 * 1000 * 1000,
       maxBufferHole: 0.5,
       backBufferLength: 30,
 
-      // Manifest retry — long timeout, many retries
       manifestLoadingTimeOut: 20000,
       manifestLoadingMaxRetry: 5,
       manifestLoadingRetryDelay: 500,
       manifestLoadingMaxRetryTimeout: 64000,
 
-      // Level (variant) retry
       levelLoadingTimeOut: 20000,
       levelLoadingMaxRetry: 6,
       levelLoadingRetryDelay: 500,
       levelLoadingMaxRetryTimeout: 64000,
 
-      // Fragment retry
       fragLoadingTimeOut: 20000,
       fragLoadingMaxRetry: 8,
       fragLoadingRetryDelay: 500,
       fragLoadingMaxRetryTimeout: 64000,
 
-      // Append retry
       appendErrorMaxRetry: 5,
 
-      // Stall/recovery
       maxStarvationDelay: 4,
       maxLoadingDelay: 4,
 
-      // Codec init — some streams need this off
       enableWebVTT: true,
       enableIMSC1: false,
       enableCEA708Captions: false,
@@ -1318,15 +1621,11 @@ function loadHls(src, subs, referer, provider, rawUrl){
     hls.loadSource(src);
     hls.attachMedia(video);
 
-    // Audio tracks may populate at different stages — listen to all
     hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, () => {
-      addLog('INFO', `audio tracks updated: ${hls.audioTracks?.length || 0}`);
+      addLog('INFO', `audio tracks: ${hls.audioTracks?.length || 0}`);
       updateAudioTracks();
     });
     hls.on(Hls.Events.AUDIO_TRACK_SWITCHED, () => updateAudioTracks());
-    hls.on(Hls.Events.AUDIO_TRACK_LOADING, (_, d) => {
-      addLog('DEBUG', `audio loading: ${d.url?.slice(0, 80)}`);
-    });
 
     startupTimer = setTimeout(() => {
       if (video.readyState < 2){
@@ -1338,11 +1637,12 @@ function loadHls(src, subs, referer, provider, rawUrl){
     hls.on(Hls.Events.MANIFEST_PARSED, (_, d) => {
       addLog('OK', `HLS manifest: ${d.levels?.length ?? '?'} levels`);
       const heights = (hls.levels || []).map(l => l.height).filter(h => h > 0);
-      if (heights.length) {
+      if (heights.length){
         const maxH = Math.max(...heights);
         if (maxH) setMetaBadge('meta-quality', `${maxH}p`);
       }
       updateAudioTracks();
+      populateQualityDropdown();
       showOverlay('Buffering…');
       video.play().catch(()=>{});
     });
@@ -1361,46 +1661,30 @@ function loadHls(src, subs, referer, provider, rawUrl){
     video.addEventListener('playing', onPlaying);
 
     hls.on(Hls.Events.ERROR, (_, d) => {
-      if (!d.fatal) {
-        if (d.details && /bufferStalledError|bufferSeekOverHole|fragParsingError/i.test(d.details)){
-          addLog('DEBUG', `HLS non-fatal: ${d.details}`);
-        }
-        return;
-      }
+      if (!d.fatal) return;
       addLog('ERROR', `HLS fatal: ${d.type} / ${d.details}`);
       clearStartupTimer();
 
-      // Manifest errors — destroy + report
       if (/manifest/i.test(d.details || '')){
         if (hls){ try { hls.destroy(); } catch(_){} hls = null; }
         clearSticky(anilistId, currentEp, currentType);
         showProviderError(provider, `Manifest did not load (${d.details})`);
         return;
       }
-
-      // Network error — retry
       if (d.type === Hls.ErrorTypes.NETWORK_ERROR){
         showOverlay('Network error, retrying…', true);
         try { hls.startLoad(); } catch(_) {}
         return;
       }
-
-      // Media error — try recover, then swap codec + recover
       if (d.type === Hls.ErrorTypes.MEDIA_ERROR){
         showOverlay('Media error, recovering…', true);
-        try {
-          hls.recoverMediaError();
-        } catch(_){
-          try {
-            hls.swapAudioCodec();
-            hls.recoverMediaError();
-          } catch(_){
-            showProviderError(provider, `Playback failed: ${d.details}`);
-          }
+        try { hls.recoverMediaError(); }
+        catch(_){
+          try { hls.swapAudioCodec(); hls.recoverMediaError(); }
+          catch(_){ showProviderError(provider, `Playback failed: ${d.details}`); }
         }
         return;
       }
-
       showProviderError(provider, `Playback failed: ${d.details}`);
     });
 
@@ -1408,9 +1692,7 @@ function loadHls(src, subs, referer, provider, rawUrl){
     addLog('INFO', 'using native HLS');
     video.src = src;
     startupTimer = setTimeout(() => {
-      if (video.readyState < 2){
-        showProviderError(provider, `Stream did not start within ${STARTUP_TIMEOUT_MS/1000}s`);
-      }
+      if (video.readyState < 2) showProviderError(provider, `Stream did not start within ${STARTUP_TIMEOUT_MS/1000}s`);
     }, STARTUP_TIMEOUT_MS);
     const onPlaying = () => {
       clearStartupTimer(); hideOverlay();
@@ -1430,8 +1712,6 @@ function loadHls(src, subs, referer, provider, rawUrl){
 async function loadMeta(){
   try {
     const info = await fetchJSON(`/anime/info/${anilistId}`, 30000, 'info');
-
-    // Title: try every fallback chain
     const title = (typeof info.title === 'object' && info.title)
       ? (info.title.english || info.title.romaji || info.title.native || info.title.userPreferred)
       : null;
@@ -1441,7 +1721,6 @@ async function loadMeta(){
     $('#header-title').textContent = t;
     document.title = t + ' · Player';
 
-    // Cover: extraLarge → large → medium → banner → placeholder
     const coverUrl = info.coverImage?.extraLarge
                   || info.coverImage?.large
                   || info.coverImage?.medium
@@ -1454,11 +1733,9 @@ async function loadMeta(){
     coverEl.onload  = () => { coverEl.classList.remove('loading'); };
     coverEl.src = coverUrl;
 
-    // Video poster (banner preferred)
     const poster = info.bannerImage || info.coverImage?.extraLarge || info.coverImage?.large || PLACEHOLDER;
     video.poster = poster;
 
-    // Subtitle line
     const bits = [];
     if (info.format) bits.push(info.format);
     if (info.seasonYear) bits.push(String(info.seasonYear));
