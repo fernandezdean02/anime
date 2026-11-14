@@ -379,6 +379,7 @@ def _build_cdn_headers(referer, range_hdr=None):
     h = {
         "User-Agent": UA,
         "Accept": "*/*",
+        "Accept-Encoding": "identity",   # prevent gzip on segments
         "Accept-Language": "en-US,en;q=0.9",
         "Sec-Fetch-Dest": "video",
         "Sec-Fetch-Mode": "no-cors",
@@ -573,11 +574,15 @@ async def proxy_seg(request: Request, url: str, referer: "str | None" = None,
     is_mp4 = _is_mp4_url(url)
 
     # ═══════════ PRIMARY: stream via dedicated client ═══════════
-    # Tried first for ALL segments (and mp4). Trusts any 2xx/3xx from CDN.
-    # Uses a client with 120s read timeout + HTTP/1.1 so long segments
-    # don't die mid-download. Cffi is only a fallback for CF challenges.
+    # CRITICAL: force Accept-Encoding: identity so CDNs don't gzip segments.
+    # If they ignore it (rare), switch to aiter_bytes (decompressing) and
+    # drop Content-Length since decompressed size differs from upstream's.
     try:
-        fh = {"User-Agent": UA, "Accept": "*/*"}
+        fh = {
+            "User-Agent": UA,
+            "Accept": "*/*",
+            "Accept-Encoding": "identity",
+        }
         if referer:
             fh["Referer"] = referer
             fh["Origin"] = _origin(referer)
@@ -589,19 +594,32 @@ async def proxy_seg(request: Request, url: str, referer: "str | None" = None,
         upstream = await client.send(req, stream=True)
         st = upstream.status_code
         ct = (upstream.headers.get("content-type") or "").lower()
+        ce = (upstream.headers.get("content-encoding") or "").lower()
 
         if st < 400:
+            needs_decode = bool(ce and ce != "identity")
+
             out_headers = {"Accept-Ranges": "bytes"}
-            for h in ("content-type", "content-length", "content-range", "cache-control"):
+            for h in ("content-type", "content-range", "cache-control"):
                 v = upstream.headers.get(h)
                 if v: out_headers[h.title()] = v
+            if not needs_decode:
+                v = upstream.headers.get("content-length")
+                if v: out_headers["Content-Length"] = v
             if not any(k.lower() == "content-type" for k in out_headers):
                 out_headers["Content-Type"] = "video/mp4" if is_mp4 else "video/mp2t"
 
+            if needs_decode:
+                log.info(f"[seg] upstream {ce} despite identity — decoding, url={url[:80]}")
+
             async def seg_body():
                 try:
-                    async for chunk in upstream.aiter_raw(chunk_size=131072):
-                        yield chunk
+                    if needs_decode:
+                        async for chunk in upstream.aiter_bytes(chunk_size=131072):
+                            yield chunk
+                    else:
+                        async for chunk in upstream.aiter_raw(chunk_size=131072):
+                            yield chunk
                 except Exception as e:
                     log.info(f"[seg] stream err: {e}")
                 finally:
@@ -635,7 +653,11 @@ async def proxy_seg(request: Request, url: str, referer: "str | None" = None,
         log.warning(f"/p/seg cffi failed ({label})")
 
     # ═══════════ LAST RESORT: buffered httpx fallback ═══════════
-    fwd_headers = {"User-Agent": UA, "Accept": "*/*"}
+    fwd_headers = {
+        "User-Agent": UA,
+        "Accept": "*/*",
+        "Accept-Encoding": "identity",
+    }
     if referer:
         fwd_headers["Referer"] = referer
         fwd_headers["Origin"] = _origin(referer)
@@ -663,15 +685,25 @@ async def proxy_seg(request: Request, url: str, referer: "str | None" = None,
         log.warning(f"HTML returned for media: {url[:100]}")
         return Response(content=b"upstream returned HTML", status_code=502, media_type="text/plain")
 
+    ce = (upstream.headers.get("content-encoding") or "").lower()
+    needs_decode = bool(ce and ce != "identity")
+
     out_headers = {"Accept-Ranges": "bytes"}
-    for h in ("content-type", "content-length", "content-range", "cache-control"):
+    for h in ("content-type", "content-range", "cache-control"):
         v = upstream.headers.get(h)
         if v: out_headers[h.title()] = v
+    if not needs_decode:
+        v = upstream.headers.get("content-length")
+        if v: out_headers["Content-Length"] = v
 
     async def body():
         try:
-            async for chunk in upstream.aiter_raw(chunk_size=131072):
-                yield chunk
+            if needs_decode:
+                async for chunk in upstream.aiter_bytes(chunk_size=131072):
+                    yield chunk
+            else:
+                async for chunk in upstream.aiter_raw(chunk_size=131072):
+                    yield chunk
         finally:
             await upstream.aclose()
 
@@ -792,6 +824,7 @@ async def health():
         "static_exists": os.path.isdir(STATIC_DIR),
         "fast_segments": True,
         "manifest_validation": True,
+        "gzip_guard": True,
         "stream_client": _stream_client is not None and not _stream_client.is_closed,
     }
 
