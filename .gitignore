@@ -1,24 +1,22 @@
-# Python cache
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-
-# Virtual environments
+# Python
 venv/
-env/
-ENV/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
 
-# IDE
+# App runtime
+.cache/
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
 .vscode/
 .idea/
 *.swp
-*.swo
 
-# Future plans
-FUTUREPLANDONTTOUCH/
-
-# OS
-.DS_Store
-Thumbs.db
+# Secrets (in case you ever add them)
+.env
+*.token

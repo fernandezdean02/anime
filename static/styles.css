@@ -1,0 +1,165 @@
+:root{
+  --bg:#0a0a0f;--elev:#15151c;--hover:#1e1e28;--border:#2a2a35;
+  --text:#e8e8f0;--muted:#9090a0;--accent:#a855f7;--accent2:#c084fc;
+  --radius:12px;--ok:#34d399;--err:#f87171;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;min-height:100vh}
+a{color:inherit;text-decoration:none}
+button{font-family:inherit}
+
+/* ── header ── */
+header{
+  background:var(--elev);border-bottom:1px solid var(--border);
+  padding:14px 20px;position:sticky;top:0;z-index:20;
+  display:flex;gap:16px;align-items:center;flex-wrap:wrap;
+}
+.brand{
+  font-weight:700;font-size:18px;
+  background:linear-gradient(90deg,var(--accent),var(--accent2));
+  -webkit-background-clip:text;background-clip:text;color:transparent;
+}
+.search{display:flex;gap:8px;flex:1;min-width:220px;max-width:520px}
+.search input{
+  flex:1;padding:10px 14px;background:var(--bg);
+  border:1px solid var(--border);border-radius:var(--radius);
+  color:var(--text);font-size:14px;outline:none;
+}
+.search input:focus{border-color:var(--accent)}
+.search button{
+  padding:10px 18px;background:var(--accent);color:#fff;
+  border:0;border-radius:var(--radius);font-weight:600;cursor:pointer;
+}
+.search button:hover{background:var(--accent2)}
+.tabs{display:flex;gap:6px;margin-left:auto}
+.tabs button{
+  padding:8px 14px;background:transparent;
+  border:1px solid var(--border);border-radius:999px;
+  color:var(--muted);cursor:pointer;font-size:13px;
+}
+.tabs button.active,.tabs button:hover{
+  color:var(--text);border-color:var(--accent);
+  background:rgba(168,85,247,.1);
+}
+
+/* ── main / grid ── */
+main{padding:20px;max-width:1400px;margin:0 auto}
+#status{color:var(--muted);padding:10px 0;min-height:24px}
+#status.err{color:var(--err)}
+
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:16px}
+.card{
+  background:var(--elev);border:1px solid var(--border);
+  border-radius:var(--radius);overflow:hidden;
+  transition:transform .15s,border-color .15s;
+  display:flex;flex-direction:column;
+}
+.card:hover{transform:translateY(-3px);border-color:var(--accent)}
+.card img{
+  width:100%;aspect-ratio:2/3;object-fit:cover;
+  background:var(--hover);display:block;
+}
+.card .info{padding:10px}
+.card h3{
+  font-size:13px;font-weight:600;line-height:1.3;margin-bottom:4px;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
+  overflow:hidden;
+}
+.card p{font-size:11px;color:var(--muted)}
+.card .score{
+  display:inline-block;margin-top:6px;
+  font-size:11px;padding:2px 8px;
+  background:rgba(52,211,153,.15);color:var(--ok);
+  border-radius:999px;font-weight:600;
+}
+
+/* ── player layout ── */
+.player-wrap{
+  display:grid;grid-template-columns:1fr 320px;gap:20px;
+  max-width:1400px;margin:0 auto;padding:20px;
+}
+@media(max-width:860px){.player-wrap{grid-template-columns:1fr}}
+
+/* ── video box (GPU compositing for smooth playback) ── */
+.video-box{
+  background:#000;border-radius:var(--radius);
+  overflow:hidden;position:relative;aspect-ratio:16/9;
+}
+.video-box video{
+  width:100%;height:100%;display:block;background:#000;
+  transform:translateZ(0);
+  -webkit-transform:translateZ(0);
+  will-change:transform;
+  backface-visibility:hidden;
+  -webkit-backface-visibility:hidden;
+}
+.overlay{
+  position:absolute;inset:0;
+  display:flex;align-items:center;justify-content:center;
+  background:rgba(0,0,0,.65);color:var(--text);
+  font-size:14px;text-align:center;padding:20px;
+  pointer-events:none;
+}
+.overlay.err{color:var(--err)}
+.overlay.hidden{display:none}
+
+/* ── metadata below video ── */
+.meta{margin-top:14px;display:flex;gap:12px;align-items:flex-start}
+.meta img{
+  width:56px;height:80px;object-fit:cover;
+  border-radius:8px;background:var(--hover);flex:0 0 auto;
+}
+.meta h2{font-size:18px;margin-bottom:4px}
+.meta p{color:var(--muted);font-size:13px}
+.back{color:var(--muted);font-size:14px}
+.back:hover{color:var(--accent2)}
+
+/* ── side panel ── */
+.side{
+  background:var(--elev);border:1px solid var(--border);
+  border-radius:var(--radius);padding:14px;
+  display:flex;flex-direction:column;gap:14px;
+  max-height:calc(100vh - 100px);
+}
+.side h3{
+  font-size:12px;color:var(--muted);
+  text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;
+}
+
+/* ── audio sub/dub toggle ── */
+.audio-toggle{display:flex;gap:6px}
+.audio-toggle button{
+  flex:1;padding:8px;
+  background:var(--bg);border:1px solid var(--border);
+  border-radius:8px;color:var(--muted);
+  cursor:pointer;font-weight:600;font-size:13px;
+}
+.audio-toggle button.active{
+  background:var(--accent);color:#fff;border-color:var(--accent);
+}
+
+/* ── episode grid ── */
+.ep-list{
+  display:grid;grid-template-columns:repeat(auto-fill,minmax(52px,1fr));
+  gap:6px;overflow-y:auto;padding-right:4px;max-height:50vh;
+}
+.ep-list button{
+  padding:9px 0;background:var(--bg);
+  border:1px solid var(--border);border-radius:8px;
+  color:var(--text);cursor:pointer;
+  font-size:13px;font-weight:600;
+}
+.ep-list button:hover{border-color:var(--accent)}
+.ep-list button.active{
+  background:var(--accent);border-color:var(--accent);color:#fff;
+}
+
+/* ── hints / retry ── */
+.hint{font-size:12px;color:var(--muted);line-height:1.5}
+.retry{
+  width:100%;padding:10px;
+  background:var(--bg);color:var(--text);
+  border:1px solid var(--border);border-radius:8px;
+  cursor:pointer;font-weight:600;
+}
+.retry:hover{border-color:var(--accent)}
