@@ -39,20 +39,10 @@
     </div>
 
     <aside class="side">
-      <!-- NEW: Content type (Sub/Dub) — top of sidebar -->
-      <div class="card">
-        <h3>Content</h3>
-        <div class="audio-toggle" id="audio-toggle">
-          <button data-type="sub" class="active">Subbed</button>
-          <button data-type="dub">Dubbed</button>
-        </div>
-      </div>
-
+      <!-- Audio dropdown now includes Content (Sub/Dub) + language tracks -->
       <div class="card">
         <h3>Audio <span class="badge empty" id="audio-count">—</span></h3>
-        <select id="audio-select" class="track-select" disabled>
-          <option>No audio yet</option>
-        </select>
+        <select id="audio-select" class="track-select"></select>
       </div>
 
       <div class="card" id="quality-card">
@@ -201,22 +191,6 @@ header .brand {
   padding: 20px;
 }
 
-/* ═══════ MOBILE: bigger episodes card ═══════ */
-@media (max-width: 900px) {
-  .player-wrap { grid-template-columns: 1fr; padding: 12px; }
-  .side { max-height: none; }
-
-  /* Bigger episodes on mobile — video is above, sidebar stacks below */
-  .episodes-card { max-height: min(720px, 78vh); }
-  .episodes-card.expanded { max-height: 96vh; }
-  .ep-list { min-height: 320px; }
-  .ep-list button {
-    min-height: 48px;
-    font-size: 15px;
-    padding: 14px 4px;
-  }
-}
-
 .video-box {
   position: relative;
   border-radius: 16px;
@@ -352,34 +326,6 @@ header .brand {
   color: var(--muted);
 }
 
-/* ═══════ SUB / DUB TOGGLE ═══════ */
-.audio-toggle {
-  display: flex;
-  gap: 4px;
-  background: rgba(0, 0, 0, 0.3);
-  border-radius: 10px;
-  padding: 4px;
-}
-.audio-toggle button {
-  flex: 1;
-  padding: 9px 12px;
-  background: transparent;
-  border: 0;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 600;
-  border-radius: 7px;
-  cursor: pointer;
-  transition: all 0.15s;
-  letter-spacing: 0.02em;
-}
-.audio-toggle button:hover:not(.active) { color: var(--text); }
-.audio-toggle button.active {
-  background: linear-gradient(135deg, var(--accent, #7c5cff), var(--accent2, #a78bfa));
-  color: #fff;
-  box-shadow: 0 2px 8px var(--glow);
-}
-
 .track-select {
   width: 100%;
   padding: 10px 32px 10px 12px;
@@ -402,6 +348,7 @@ header .brand {
 .track-select:focus { border-color: var(--accent, #7c5cff); box-shadow: 0 0 0 3px rgba(124, 92, 255, 0.12); }
 .track-select:disabled { opacity: 0.75; cursor: not-allowed; }
 .track-select option { background: #14141c; color: var(--text); padding: 8px; }
+.track-select optgroup { background: #0d0d14; color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; font-style: normal; padding: 4px 0; }
 
 .slider-row {
   display: grid;
@@ -457,7 +404,7 @@ header .brand {
   font-variant-numeric: tabular-nums;
 }
 
-/* ═══════ EPISODES ═══════ */
+/* ═══════ EPISODES (base) ═══════ */
 .episodes-card {
   flex: 1;
   min-height: 0;
@@ -692,6 +639,29 @@ header .brand {
   margin: 0;
   max-height: calc(60vh - 48px);
 }
+
+/* ═══════ MOBILE OVERRIDES — MUST BE LAST SO THEY WIN ═══════ */
+@media (max-width: 900px) {
+  .player-wrap { grid-template-columns: 1fr; padding: 12px; gap: 12px; }
+  .side { max-height: none; }
+
+  /* Episode card: bigger on mobile */
+  .episodes-card { max-height: min(760px, 82vh); }
+  .episodes-card.expanded { max-height: 96vh; }
+
+  /* Episode grid: taller rows + bigger buttons */
+  .ep-list {
+    min-height: 360px;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 8px;
+  }
+  .ep-list button {
+    min-height: 52px;
+    font-size: 16px;
+    padding: 16px 4px;
+    border-radius: 12px;
+  }
+}
 </style>
 
 <script>
@@ -852,33 +822,6 @@ function setMetaBadge(id, text){
 }
 // ---------------- END STATUS ----------------
 
-// ---------------- SUB / DUB TOGGLE ----------------
-document.getElementById('audio-toggle').addEventListener('click', (e) => {
-  const b = e.target.closest('button[data-type]');
-  if (!b) return;
-  const newType = b.dataset.type;
-  if (newType === currentType) return;
-
-  currentType = newType;
-  [...document.getElementById('audio-toggle').children].forEach(x =>
-    x.classList.toggle('active', x === b));
-
-  // Clear any cached extract for the new type so we always fetch fresh
-  clearExtractCache(anilistId, currentEp, currentType);
-
-  // Re-render episodes (sub/dub availability may differ between providers)
-  renderEpisodes();
-
-  // Update URL so refresh preserves the choice
-  try {
-    history.replaceState(null, '', `?id=${anilistId}&ep=${currentEp}&type=${currentType}`);
-  } catch {}
-
-  addLog('WARN', `content → ${currentType} (re-extracting)`);
-  play(true, { deep: false });
-});
-// ---------------- END SUB / DUB ----------------
-
 // ---------------- AUDIO GRAPH / VOLUME / BRIGHTNESS ----------------
 function ensureAudioGraph(){
   if (audioCtx) return true;
@@ -967,18 +910,97 @@ document.addEventListener('click', () => {
 }, { once: false });
 // ---------------- END AUDIO/BRIGHTNESS ----------------
 
-// ---------------- TRACK CONTROLS ----------------
-function resetTrackControls(){
-  const audioSel = document.getElementById('audio-select');
-  const audioCount = document.getElementById('audio-count');
-  if (audioSel){ audioSel.innerHTML = '<option>No audio yet</option>'; audioSel.disabled = true; }
-  if (audioCount){ audioCount.textContent = '—'; audioCount.classList.add('empty'); }
+// ---------------- AUDIO DROPDOWN (Content + Language Tracks) ----------------
+function buildContentOptionsHTML(){
+  const curLabel  = currentType === 'dub' ? 'Dubbed' : 'Subbed';
+  const otherType = currentType === 'dub' ? 'sub' : 'dub';
+  const otherLabel = otherType === 'dub' ? 'Dubbed' : 'Subbed';
+  return `<optgroup label="Content">
+    <option value="content:${currentType}" selected>${esc(curLabel)} (current)</option>
+    <option value="content:${otherType}">${esc(otherLabel)}</option>
+  </optgroup>`;
+}
 
+function buildAudioTrackOptionsHTML(){
+  const tracks = (hls && Array.isArray(hls.audioTracks)) ? hls.audioTracks : [];
+  if (tracks.length > 0){
+    const currentIdx = typeof hls.audioTrack === 'number' ? hls.audioTrack : 0;
+    let html = `<optgroup label="Audio Track">`;
+    tracks.forEach((t, i) => {
+      const name = t.name || t.lang || `Track ${i + 1}`;
+      const label = t.lang && t.name && t.name !== t.lang ? `${name} · ${t.lang}` : name;
+      html += `<option value="track:${i}"${i === currentIdx ? ' selected' : ''}>${esc(label)}</option>`;
+    });
+    html += `</optgroup>`;
+    return { html, count: tracks.length };
+  }
+  if (video.src || video.currentSrc){
+    // Single audio stream (mp4 / native HLS / HLS with 1 track)
+    return {
+      html: `<optgroup label="Audio Track"><option value="track:0" selected>Original</option></optgroup>`,
+      count: 1,
+    };
+  }
+  return { html: '', count: 0 };
+}
+
+function updateAudioTracks(){
+  const select = document.getElementById('audio-select');
+  const countEl = document.getElementById('audio-count');
+  if (!select) return;
+
+  const trackPart = buildAudioTrackOptionsHTML();
+  select.innerHTML = buildContentOptionsHTML() + trackPart.html;
+  select.disabled = false;
+
+  if (countEl){
+    if (trackPart.count > 0){
+      countEl.textContent = String(trackPart.count);
+      countEl.classList.remove('empty');
+    } else {
+      countEl.textContent = '—';
+      countEl.classList.add('empty');
+    }
+  }
+}
+
+document.getElementById('audio-select').addEventListener('change', (e) => {
+  const val = e.target.value || '';
+
+  if (val.startsWith('content:')){
+    const newType = val.slice('content:'.length);
+    if (newType === currentType) return;
+    currentType = newType;
+    clearExtractCache(anilistId, currentEp, currentType);
+    try { history.replaceState(null, '', `?id=${anilistId}&ep=${currentEp}&type=${currentType}`); } catch {}
+    addLog('WARN', `content → ${currentType} (re-extracting)`);
+    renderEpisodes();
+    play(true, { deep: false });
+    return;
+  }
+
+  if (val.startsWith('track:')){
+    const idx = parseInt(val.slice('track:'.length), 10);
+    if (hls && hls.audioTracks && hls.audioTracks[idx]){
+      hls.audioTrack = idx;
+      addLog('INFO', `audio → ${hls.audioTracks[idx].name || hls.audioTracks[idx].lang || idx}`);
+    }
+  }
+});
+// ---------------- END AUDIO DROPDOWN ----------------
+
+// ---------------- TRACK CONTROLS (reset) ----------------
+function resetTrackControls(){
+  // Audio: always enabled, shows Content (Sub/Dub) at minimum
+  updateAudioTracks();
+
+  // Captions
   const capSel = document.getElementById('caption-select');
   const capCount = document.getElementById('caption-count');
   if (capSel){ capSel.innerHTML = '<option value="-1">Off</option>'; capSel.value = '-1'; capSel.disabled = true; }
   if (capCount){ capCount.textContent = '—'; capCount.classList.add('empty'); }
 
+  // Quality
   const qSel = document.getElementById('quality-select');
   const qCount = document.getElementById('quality-count');
   if (qSel){ qSel.innerHTML = '<option value="-1">Auto</option>'; qSel.value = '-1'; qSel.disabled = true; }
@@ -987,42 +1009,6 @@ function resetTrackControls(){
   currentCaptionTrack = -1;
   currentSubs = [];
 }
-
-function updateAudioTracks(){
-  const select = document.getElementById('audio-select');
-  const countEl = document.getElementById('audio-count');
-  if (!select) return;
-  const tracks = (hls && Array.isArray(hls.audioTracks)) ? hls.audioTracks : [];
-  if (!tracks.length){
-    if (video.src || video.currentSrc){
-      select.innerHTML = '<option value="0">Original</option>';
-      select.value = '0';
-      select.disabled = true;
-      if (countEl){ countEl.textContent = '1'; countEl.classList.remove('empty'); }
-    } else {
-      select.innerHTML = '<option>No audio yet</option>';
-      select.disabled = true;
-      if (countEl){ countEl.textContent = '—'; countEl.classList.add('empty'); }
-    }
-    return;
-  }
-  const currentIdx = typeof hls.audioTrack === 'number' ? hls.audioTrack : 0;
-  select.innerHTML = tracks.map((t, i) => {
-    const name = t.name || t.lang || `Track ${i + 1}`;
-    const label = t.lang && t.name && t.name !== t.lang ? `${name} · ${t.lang}` : name;
-    return `<option value="${i}"${i === currentIdx ? ' selected' : ''}>${esc(label)}</option>`;
-  }).join('');
-  select.disabled = tracks.length <= 1;
-  if (countEl){ countEl.textContent = String(tracks.length); countEl.classList.remove('empty'); }
-}
-
-document.getElementById('audio-select').addEventListener('change', (e) => {
-  const idx = parseInt(e.target.value, 10);
-  if (hls && hls.audioTracks && hls.audioTracks[idx]){
-    hls.audioTrack = idx;
-    addLog('INFO', `audio → ${hls.audioTracks[idx].name || hls.audioTracks[idx].lang}`);
-  }
-});
 
 function updateCaptionTracks(){
   const select = document.getElementById('caption-select');
@@ -1068,6 +1054,7 @@ function applyCaptionTrack(idx){
 document.getElementById('caption-select').addEventListener('change', (e) => {
   applyCaptionTrack(parseInt(e.target.value, 10));
 });
+// ---------------- END TRACK CONTROLS ----------------
 
 // ---------------- QUALITY ----------------
 function populateQualityDropdown(){
@@ -1290,7 +1277,7 @@ function episodesFor(type){
 function renderEpisodes(){
   const list = episodesFor(currentType);
   if (!list.length){
-    epList.innerHTML = `<span class="hint">No ${currentType} episodes available from any provider.</span>`;
+    epList.innerHTML = `<span class="hint">No ${currentType} episodes from any provider.</span>`;
     return;
   }
   epList.innerHTML = list.map(e =>
@@ -1461,7 +1448,6 @@ async function play(nocache = false, { deep = false } = {}){
     return;
   }
 
-  // ═══ FAST PATH: fresh sticky URL — play immediately, no extract ═══
   if (stickyFresh){
     addLog('INFO', 'sticky fresh, playing immediately');
     setStatus('From cache', 'loading');
@@ -1525,7 +1511,6 @@ function showProviderError(provider, reason){
       </div>
     </div>`;
 
-  // Retry: re-extract with the same provider + same content type
   const retryBtn = document.getElementById('overlay-retry');
   if (retryBtn) retryBtn.addEventListener('click', () => {
     clearExtractCache(anilistId, currentEp, currentType);
@@ -1862,14 +1847,12 @@ $('#retry').addEventListener('click', () => {
 // ---------------- BOOT ----------------
 (async function boot(){
   if (!anilistId){ showOverlay('Missing ?id= in URL', true); return; }
-
-  // Set initial Sub/Dub toggle state from ?type= param
-  const toggleBtns = document.getElementById('audio-toggle').children;
-  [...toggleBtns].forEach(x =>
-    x.classList.toggle('active', x.dataset.type === currentType));
-
   addLog('INFO', `anilistId=${anilistId} ep=${startEp} type=${startType} provider=${currentProvider}`);
   if (STREAM_URL_OVERRIDE) addLog('INFO', 'STREAM_URL_OVERRIDE active');
+
+  // Populate the Audio dropdown with content options immediately (before play)
+  updateAudioTracks();
+
   loadMeta();
   loadEpisodesBackground();
   play();
