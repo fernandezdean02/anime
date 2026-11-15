@@ -7,6 +7,10 @@
   <title>Player</title>
   <link rel="stylesheet" href="./styles.css">
   <script src="./hls.min.js"></script>
+  <script>
+    // Prevent browser from restoring scroll position on navigation
+    if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
+  </script>
 </head>
 <body>
   <header>
@@ -16,8 +20,9 @@
 
   <div class="player-wrap">
     <div class="player-main">
-      <div class="video-box">
+      <div class="video-box" id="video-box">
         <video id="video" controls playsinline webkit-playsinline preload="auto"></video>
+        <div id="subtitle-overlay"></div>
         <div class="overlay" id="overlay">Loading…</div>
       </div>
       <div class="meta">
@@ -39,7 +44,6 @@
     </div>
 
     <aside class="side">
-      <!-- Audio dropdown now includes Content (Sub/Dub) + language tracks -->
       <div class="card">
         <h3>Audio <span class="badge empty" id="audio-count">—</span></h3>
         <select id="audio-select" class="track-select"></select>
@@ -53,7 +57,49 @@
       </div>
 
       <div class="card" id="cc-section">
-        <h3>Captions <span class="badge empty" id="caption-count">—</span></h3>
+        <h3>
+          <span>Captions <span class="badge empty" id="caption-count">—</span></span>
+          <button id="cc-settings-toggle" class="cc-toggle" type="button" title="Caption settings" aria-label="Caption settings">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="3"/>
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+            </svg>
+          </button>
+        </h3>
+
+        <div class="caption-settings" id="caption-settings" hidden>
+          <div class="cs-row">
+            <div class="cs-label"><span>Size</span><span class="cs-val" id="cc-size-val">100%</span></div>
+            <input type="range" id="cc-size" min="50" max="200" step="5" value="100">
+          </div>
+          <div class="cs-row">
+            <div class="cs-label"><span>Font</span></div>
+            <select id="cc-font" class="cs-select">
+              <option value="system">System</option>
+              <option value="sans">Sans Serif</option>
+              <option value="serif">Serif</option>
+              <option value="mono">Monospace</option>
+            </select>
+          </div>
+          <div class="cs-row">
+            <div class="cs-label"><span>Text Color</span></div>
+            <input type="color" id="cc-color" value="#ffffff" class="cs-color">
+          </div>
+          <div class="cs-row">
+            <div class="cs-label"><span>Background</span></div>
+            <input type="color" id="cc-bg" value="#000000" class="cs-color">
+          </div>
+          <div class="cs-row">
+            <div class="cs-label"><span>BG Opacity</span><span class="cs-val" id="cc-bg-opacity-val">75%</span></div>
+            <input type="range" id="cc-bg-opacity" min="0" max="100" step="5" value="75">
+          </div>
+          <div class="cs-row">
+            <div class="cs-label"><span>Position</span><span class="cs-val" id="cc-position-val">10%</span></div>
+            <input type="range" id="cc-position" min="2" max="60" step="1" value="10">
+          </div>
+          <button id="cc-reset" class="cc-reset" type="button">Reset to defaults</button>
+        </div>
+
         <select id="caption-select" class="track-select" disabled>
           <option value="-1">Off</option>
         </select>
@@ -191,6 +237,7 @@ header .brand {
   padding: 20px;
 }
 
+/* ═══════ VIDEO + SUBTITLE OVERLAY ═══════ */
 .video-box {
   position: relative;
   border-radius: 16px;
@@ -208,6 +255,27 @@ header .brand {
   background: #000;
   object-fit: contain;
   transition: filter .15s ease;
+}
+
+/* Custom subtitle overlay — styled entirely via inline JS */
+#subtitle-overlay {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 10%;
+  max-width: 90%;
+  padding: 6px 14px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.75);
+  color: #ffffff;
+  font-size: 16px;
+  line-height: 1.35;
+  text-align: center;
+  pointer-events: none;
+  z-index: 3;
+  white-space: pre-wrap;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+  display: none;
 }
 
 .meta {
@@ -326,6 +394,124 @@ header .brand {
   color: var(--muted);
 }
 
+/* ═══════ CAPTION SETTINGS ═══════ */
+.cc-toggle {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--glass-border);
+  color: var(--muted);
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+.cc-toggle:hover { color: var(--accent2, #a78bfa); border-color: rgba(124, 92, 255, 0.4); }
+.cc-toggle.active { color: var(--accent2, #a78bfa); border-color: var(--accent, #7c5cff); background: rgba(124, 92, 255, 0.12); }
+
+.caption-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0 0 12px;
+  padding: 12px;
+  background: rgba(0, 0, 0, 0.32);
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.04);
+}
+.caption-settings[hidden] { display: none; }
+
+.cs-row { display: flex; flex-direction: column; gap: 5px; }
+.cs-label {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 10px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 700;
+}
+.cs-val {
+  color: var(--accent2, #a78bfa);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+}
+.caption-settings input[type="range"] {
+  width: 100%;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
+  outline: none;
+  -webkit-appearance: none;
+  appearance: none;
+  cursor: pointer;
+  accent-color: var(--accent, #7c5cff);
+}
+.caption-settings input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--accent, #7c5cff), var(--accent2, #a78bfa));
+  cursor: pointer;
+  box-shadow: 0 0 0 3px rgba(124, 92, 255, 0.18), 0 2px 6px rgba(124, 92, 255, 0.4);
+}
+.caption-settings input[type="range"]::-moz-range-thumb {
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--accent, #7c5cff), var(--accent2, #a78bfa));
+  cursor: pointer;
+  border: 0;
+}
+.cs-select {
+  width: 100%;
+  padding: 8px 10px;
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  outline: none;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 24 24' fill='none' stroke='%23a0a0b0' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  padding-right: 28px;
+}
+.cs-select:focus { border-color: var(--accent, #7c5cff); }
+.cs-color {
+  width: 100%;
+  height: 32px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  padding: 3px;
+  background: rgba(0, 0, 0, 0.3);
+  cursor: pointer;
+}
+.cc-reset {
+  margin-top: 4px;
+  padding: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--muted);
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.cc-reset:hover { color: var(--text); border-color: rgba(124, 92, 255, 0.3); }
+
 .track-select {
   width: 100%;
   padding: 10px 32px 10px 12px;
@@ -404,7 +590,7 @@ header .brand {
   font-variant-numeric: tabular-nums;
 }
 
-/* ═══════ EPISODES (base) ═══════ */
+/* ═══════ EPISODES ═══════ */
 .episodes-card {
   flex: 1;
   min-height: 0;
@@ -580,6 +766,9 @@ header .brand {
   font-weight: 500;
   padding: 24px;
   text-align: center;
+  position: absolute;
+  inset: 0;
+  z-index: 4;
 }
 .overlay.hidden { display: none !important; }
 .overlay button { pointer-events: auto !important; cursor: pointer; }
@@ -642,16 +831,14 @@ header .brand {
   max-height: calc(60vh - 48px);
 }
 
-/* ═══════ MOBILE OVERRIDES — MUST BE LAST SO THEY WIN ═══════ */
+/* ═══════ MOBILE OVERRIDES ═══════ */
 @media (max-width: 900px) {
   .player-wrap { grid-template-columns: 1fr; padding: 12px; gap: 12px; }
   .side { max-height: none; }
 
-  /* Episode card: bigger on mobile */
   .episodes-card { max-height: min(760px, 82vh); }
   .episodes-card.expanded { max-height: 96vh; }
 
-  /* Episode grid: taller rows + bigger buttons */
   .ep-list {
     min-height: 360px;
     grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -733,6 +920,33 @@ $('#log-copy').addEventListener('click', async () => {
 });
 // ---------------- END DEV LOG ----------------
 
+// ---------------- SCROLL HELPERS ----------------
+// Scroll window back to the video (used after boot, episode switch, sub/dub switch).
+// On desktop the sidebar and video are side by side, so no scrolling needed.
+function scrollToVideo(smooth = true){
+  if (window.innerWidth > 900) return;
+  const box = document.getElementById('video-box');
+  if (!box) return;
+  const headerH = document.querySelector('header')?.offsetHeight || 0;
+  const y = window.scrollY + box.getBoundingClientRect().top - headerH;
+  window.scrollTo({ top: Math.max(0, y), behavior: smooth ? 'smooth' : 'auto' });
+}
+
+// Scroll the active episode button into view WITHIN the episode list only —
+// never bubbles up to the window, so it can't scroll the page away from the video.
+function scrollActiveIntoEpList(smooth = false){
+  const active = epList.querySelector('button.active');
+  if (!active) return;
+  const container = epList;
+  const cRect = container.getBoundingClientRect();
+  const bRect = active.getBoundingClientRect();
+  if (bRect.top < cRect.top || bRect.bottom > cRect.bottom){
+    const offset = active.offsetTop - container.clientHeight / 2 + active.clientHeight / 2;
+    container.scrollTo({ top: Math.max(0, offset), behavior: smooth ? 'smooth' : 'auto' });
+  }
+}
+// ---------------- END SCROLL HELPERS ----------------
+
 // ---------------- PROVIDERS ----------------
 const ALL_PROVIDERS = ['kaa', 'anizone', 'aniwaves', 'anineko', 'animeonsen', 'anikoto', 'mkissa', 'animegg', 'anibd'];
 const PROVIDER_LIST = [...new Set(ALL_PROVIDERS)];
@@ -767,6 +981,7 @@ document.getElementById('provider-select').addEventListener('change', (e) => {
   try { sessionStorage.setItem(PROVIDER_STORAGE_KEY, currentProvider); } catch {}
   clearExtractCache(anilistId, currentEp, currentType);
   addLog('WARN', `server → ${currentProvider}`);
+  scrollToVideo();
   play(true, { deep: false });
 });
 // ---------------- END PROVIDERS ----------------
@@ -777,7 +992,7 @@ const PLACEHOLDER = "data:image/svg+xml;utf8," + encodeURIComponent(
      <text x='50%' y='55%' fill='#6a6a80' font-family='sans-serif' font-size='12' text-anchor='middle'>No cover</text>
    </svg>`);
 
-// ─── TIMEOUTS (aligned with serve.py backend limits + 5s buffer) ───
+// ─── TIMEOUTS ───
 const EXTRACT_TIMEOUT_MS   = 30000;
 const FULL_RACE_TIMEOUT_MS = 55000;
 const DEEP_RACE_TIMEOUT_MS = 65000;
@@ -802,6 +1017,7 @@ let overlayTimer = null;
 let currentSubs = [];
 let currentSubsReferer = null;
 let currentCaptionTrack = -1;
+let subtitleCues = [];  // parsed VTT cues for the active caption track
 
 // Audio graph for volume boost
 let audioCtx = null;
@@ -824,6 +1040,204 @@ function setMetaBadge(id, text){
   el.textContent = text || '—';
 }
 // ---------------- END STATUS ----------------
+
+// ---------------- CAPTION SETTINGS ----------------
+const CC_SETTINGS_KEY = 'player-caption-settings';
+const CC_DEFAULTS = {
+  size: 100,
+  font: 'system',
+  color: '#ffffff',
+  bgColor: '#000000',
+  bgOpacity: 75,
+  position: 10,
+};
+let captionSettings = { ...CC_DEFAULTS };
+
+function loadCaptionSettings(){
+  try {
+    const raw = localStorage.getItem(CC_SETTINGS_KEY);
+    if (raw){
+      const parsed = JSON.parse(raw);
+      captionSettings = { ...CC_DEFAULTS, ...parsed };
+    }
+  } catch {}
+}
+function saveCaptionSettings(){
+  try { localStorage.setItem(CC_SETTINGS_KEY, JSON.stringify(captionSettings)); } catch {}
+}
+
+function hexToRgba(hex, alpha){
+  hex = String(hex || '#000').replace('#','');
+  if (hex.length === 3) hex = hex.split('').map(c => c + c).join('');
+  const r = parseInt(hex.slice(0, 2), 16) || 0;
+  const g = parseInt(hex.slice(2, 4), 16) || 0;
+  const b = parseInt(hex.slice(4, 6), 16) || 0;
+  return `rgba(${r},${g},${b},${alpha})`;
+}
+
+const FONT_MAP = {
+  system: '-apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif',
+  sans:   'Helvetica, Arial, "Segoe UI", sans-serif',
+  serif:  'Georgia, "Times New Roman", serif',
+  mono:   '"Courier New", Consolas, monospace',
+};
+
+function applyCaptionSettings(){
+  const el = document.getElementById('subtitle-overlay');
+  if (!el) return;
+
+  // Font size relative to the video's actual rendered height
+  const videoH = video.clientHeight || video.getBoundingClientRect().height || 360;
+  const fs = Math.max(12, Math.round((videoH / 22) * (captionSettings.size / 100)));
+
+  const bg = hexToRgba(captionSettings.bgColor, captionSettings.bgOpacity / 100);
+  el.style.fontSize = fs + 'px';
+  el.style.fontFamily = FONT_MAP[captionSettings.font] || FONT_MAP.system;
+  el.style.color = captionSettings.color;
+  el.style.background = bg;
+  el.style.bottom = captionSettings.position + '%';
+  // Show only when there's active text
+  el.style.display = el.textContent ? 'block' : 'none';
+}
+
+// Sync the input controls with the current state
+function syncCaptionControls(){
+  const s = captionSettings;
+  document.getElementById('cc-size').value = s.size;
+  document.getElementById('cc-size-val').textContent = s.size + '%';
+  document.getElementById('cc-font').value = s.font;
+  document.getElementById('cc-color').value = s.color;
+  document.getElementById('cc-bg').value = s.bgColor;
+  document.getElementById('cc-bg-opacity').value = s.bgOpacity;
+  document.getElementById('cc-bg-opacity-val').textContent = s.bgOpacity + '%';
+  document.getElementById('cc-position').value = s.position;
+  document.getElementById('cc-position-val').textContent = s.position + '%';
+}
+
+// Wire up all the settings inputs
+(function bindCaptionSettings(){
+  const inpSize = document.getElementById('cc-size');
+  const inpFont = document.getElementById('cc-font');
+  const inpColor = document.getElementById('cc-color');
+  const inpBg = document.getElementById('cc-bg');
+  const inpBgOp = document.getElementById('cc-bg-opacity');
+  const inpPos = document.getElementById('cc-position');
+  const resetBtn = document.getElementById('cc-reset');
+  const toggleBtn = document.getElementById('cc-settings-toggle');
+  const panel = document.getElementById('caption-settings');
+
+  inpSize.addEventListener('input', () => {
+    captionSettings.size = parseInt(inpSize.value, 10);
+    document.getElementById('cc-size-val').textContent = captionSettings.size + '%';
+    applyCaptionSettings();
+    saveCaptionSettings();
+  });
+  inpFont.addEventListener('change', () => {
+    captionSettings.font = inpFont.value;
+    applyCaptionSettings();
+    saveCaptionSettings();
+  });
+  inpColor.addEventListener('input', () => {
+    captionSettings.color = inpColor.value;
+    applyCaptionSettings();
+    saveCaptionSettings();
+  });
+  inpBg.addEventListener('input', () => {
+    captionSettings.bgColor = inpBg.value;
+    applyCaptionSettings();
+    saveCaptionSettings();
+  });
+  inpBgOp.addEventListener('input', () => {
+    captionSettings.bgOpacity = parseInt(inpBgOp.value, 10);
+    document.getElementById('cc-bg-opacity-val').textContent = captionSettings.bgOpacity + '%';
+    applyCaptionSettings();
+    saveCaptionSettings();
+  });
+  inpPos.addEventListener('input', () => {
+    captionSettings.position = parseInt(inpPos.value, 10);
+    document.getElementById('cc-position-val').textContent = captionSettings.position + '%';
+    applyCaptionSettings();
+    saveCaptionSettings();
+  });
+  resetBtn.addEventListener('click', () => {
+    captionSettings = { ...CC_DEFAULTS };
+    syncCaptionControls();
+    applyCaptionSettings();
+    saveCaptionSettings();
+  });
+
+  // Toggle settings panel — persists the expanded/collapsed state
+  const CC_PANEL_OPEN_KEY = 'player-caption-settings-open';
+  let isOpen = false;
+  try { isOpen = localStorage.getItem(CC_PANEL_OPEN_KEY) === '1'; } catch {}
+  if (isOpen){ panel.hidden = false; toggleBtn.classList.add('active'); }
+  toggleBtn.addEventListener('click', () => {
+    const open = panel.hidden;
+    panel.hidden = !open;
+    toggleBtn.classList.toggle('active', open);
+    try { localStorage.setItem(CC_PANEL_OPEN_KEY, open ? '1' : '0'); } catch {}
+  });
+
+  loadCaptionSettings();
+  syncCaptionControls();
+  applyCaptionSettings();
+
+  // Re-apply caption settings when the video box resizes
+  window.addEventListener('resize', () => applyCaptionSettings());
+})();
+
+// ---------------- CUSTOM SUBTITLE RENDERER ----------------
+// Native <track> subtitles can't be styled for position via ::cue,
+// so we fetch the VTT, parse the cues, and render them into a div
+// we control entirely.
+function parseVTT(text){
+  const cues = [];
+  if (!text) return cues;
+  const clean = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  const blocks = clean.split(/\n{2,}/);
+  const timeRe = /(\d{1,2}):(\d{2}):(\d{2})[.,](\d{3})\s*-->\s*(\d{1,2}):(\d{2}):(\d{2})[.,](\d{3})/;
+  const toSec = (h, m, s, ms) => parseInt(h, 10)*3600 + parseInt(m, 10)*60 + parseInt(s, 10) + parseInt(ms, 10)/1000;
+  for (const block of blocks){
+    const lines = block.split('\n').filter(l => l.trim() !== '');
+    if (!lines.length) continue;
+    let idx = -1;
+    for (let i = 0; i < lines.length; i++){
+      if (lines[i].includes('-->')){ idx = i; break; }
+    }
+    if (idx < 0) continue;
+    const match = lines[idx].match(timeRe);
+    if (!match) continue;
+    const start = toSec(match[1], match[2], match[3], match[4]);
+    const end   = toSec(match[5], match[6], match[7], match[8]);
+    const textLines = lines.slice(idx + 1);
+    const text = textLines.join('\n').replace(/<[^>]+>/g, '').trim();
+    if (text && end > start){
+      cues.push({ start, end, text });
+    }
+  }
+  return cues;
+}
+
+function updateSubtitleOverlay(){
+  const el = document.getElementById('subtitle-overlay');
+  if (!el) return;
+  if (currentCaptionTrack === -1 || !subtitleCues.length){
+    if (el.textContent) el.textContent = '';
+    if (el.style.display !== 'none') el.style.display = 'none';
+    return;
+  }
+  const t = video.currentTime;
+  const cue = subtitleCues.find(c => t >= c.start && t <= c.end);
+  const next = cue ? cue.text : '';
+  if (next !== el.textContent){
+    el.textContent = next;
+  }
+  el.style.display = next ? 'block' : 'none';
+}
+
+video.addEventListener('timeupdate', updateSubtitleOverlay);
+video.addEventListener('seeked', updateSubtitleOverlay);
+// ---------------- END CAPTION SETTINGS / SUBTITLE RENDERER ----------------
 
 // ---------------- AUDIO GRAPH / VOLUME / BRIGHTNESS ----------------
 function ensureAudioGraph(){
@@ -938,7 +1352,6 @@ function buildAudioTrackOptionsHTML(){
     return { html, count: tracks.length };
   }
   if (video.src || video.currentSrc){
-    // Single audio stream (mp4 / native HLS / HLS with 1 track)
     return {
       html: `<optgroup label="Audio Track"><option value="track:0" selected>Original</option></optgroup>`,
       count: 1,
@@ -978,6 +1391,7 @@ document.getElementById('audio-select').addEventListener('change', (e) => {
     try { history.replaceState(null, '', `?id=${anilistId}&ep=${currentEp}&type=${currentType}`); } catch {}
     addLog('WARN', `content → ${currentType} (re-extracting)`);
     renderEpisodes();
+    scrollToVideo();
     play(true, { deep: false });
     return;
   }
@@ -992,18 +1406,15 @@ document.getElementById('audio-select').addEventListener('change', (e) => {
 });
 // ---------------- END AUDIO DROPDOWN ----------------
 
-// ---------------- TRACK CONTROLS (reset) ----------------
+// ---------------- TRACK CONTROLS ----------------
 function resetTrackControls(){
-  // Audio: always enabled, shows Content (Sub/Dub) at minimum
   updateAudioTracks();
 
-  // Captions
   const capSel = document.getElementById('caption-select');
   const capCount = document.getElementById('caption-count');
   if (capSel){ capSel.innerHTML = '<option value="-1">Off</option>'; capSel.value = '-1'; capSel.disabled = true; }
   if (capCount){ capCount.textContent = '—'; capCount.classList.add('empty'); }
 
-  // Quality
   const qSel = document.getElementById('quality-select');
   const qCount = document.getElementById('quality-count');
   if (qSel){ qSel.innerHTML = '<option value="-1">Auto</option>'; qSel.value = '-1'; qSel.disabled = true; }
@@ -1011,6 +1422,8 @@ function resetTrackControls(){
 
   currentCaptionTrack = -1;
   currentSubs = [];
+  subtitleCues = [];
+  updateSubtitleOverlay();
 }
 
 function updateCaptionTracks(){
@@ -1034,24 +1447,32 @@ function updateCaptionTracks(){
   if (countEl){ countEl.textContent = String(subs.length); countEl.classList.remove('empty'); }
 }
 
-function applyCaptionTrack(idx){
-  [...video.querySelectorAll('track')].forEach(t => t.remove());
+async function applyCaptionTrack(idx){
   currentCaptionTrack = idx;
+  subtitleCues = [];
+  updateSubtitleOverlay();
+
+  // Remove any leftover native tracks from older versions
+  [...video.querySelectorAll('track')].forEach(t => t.remove());
+
   if (idx === -1){ addLog('INFO', 'captions off'); return; }
+
   const s = currentSubs[idx];
   if (!s){ addLog('WARN', `caption ${idx} missing`); return; }
   addLog('INFO', `captions → ${s.label || s.srclang || idx}`);
-  const t = document.createElement('track');
-  t.kind = 'subtitles';
-  t.label = s.label || `Track ${idx + 1}`;
-  t.srclang = s.srclang || 'en';
-  t.src = proxySeg(s.url, currentSubsReferer);
-  t.default = true;
-  video.appendChild(t);
-  setTimeout(() => {
-    const tracks = video.textTracks;
-    for (let i = 0; i < tracks.length; i++) tracks[i].mode = 'showing';
-  }, 200);
+
+  try {
+    const url = proxySeg(s.url, currentSubsReferer);
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const vtt = await r.text();
+    subtitleCues = parseVTT(vtt);
+    addLog('OK', `captions loaded: ${subtitleCues.length} cues`);
+    applyCaptionSettings();
+    updateSubtitleOverlay();
+  } catch(e){
+    addLog('WARN', `captions fetch failed: ${e.message}`);
+  }
 }
 
 document.getElementById('caption-select').addEventListener('change', (e) => {
@@ -1126,10 +1547,7 @@ function setEpisodesExpanded(expanded){
   header.setAttribute('aria-expanded', expanded ? 'true' : 'false');
   try { localStorage.setItem('episodes-expanded', expanded ? '1' : '0'); } catch {}
   if (expanded){
-    setTimeout(() => {
-      const active = document.querySelector('.ep-list button.active');
-      if (active) active.scrollIntoView({ block: 'center', behavior: 'smooth' });
-    }, 340);
+    setTimeout(() => scrollActiveIntoEpList(true), 340);
   }
 }
 
@@ -1286,8 +1704,7 @@ function renderEpisodes(){
   epList.innerHTML = list.map(e =>
     `<button data-ep="${e.number}" class="${e.number===currentEp?'active':''}" title="Episode ${e.number}">${e.number}</button>`
   ).join('');
-  const active = epList.querySelector('button.active');
-  if (active) active.scrollIntoView({ block: 'nearest' });
+  scrollActiveIntoEpList(false);
   epSource.textContent = episodes ? '' : 'estimated';
 }
 function pickFallbackEp(type){
@@ -1324,6 +1741,8 @@ function attachSubtitles(subs, referer){
   currentSubs = subs || [];
   currentSubsReferer = referer;
   currentCaptionTrack = -1;
+  subtitleCues = [];
+  updateSubtitleOverlay();
   updateCaptionTracks();
   if (currentSubs.length) addLog('INFO', `CC: ${currentSubs.length} track(s)`);
 }
@@ -1832,11 +2251,11 @@ epList.addEventListener('click', ev => {
   if (card && !card.classList.contains('expanded')){
     setEpisodesExpanded(true);
   } else {
-    setTimeout(() => {
-      const active = document.querySelector('.ep-list button.active');
-      if (active) active.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-    }, 50);
+    setTimeout(() => scrollActiveIntoEpList(true), 50);
   }
+
+  // On mobile, jump back to the video so the user sees the new episode playing
+  scrollToVideo();
 
   play();
 });
@@ -1844,21 +2263,29 @@ epList.addEventListener('click', ev => {
 $('#retry').addEventListener('click', () => {
   clearExtractCache(anilistId, currentEp, currentType);
   addLog('WARN', 'manual retry');
+  scrollToVideo();
   play(true, { deep: false });
 });
 
 // ---------------- BOOT ----------------
 (async function boot(){
   if (!anilistId){ showOverlay('Missing ?id= in URL', true); return; }
+
+  // Always start at the top of the page (video should be visible)
+  window.scrollTo(0, 0);
+
   addLog('INFO', `anilistId=${anilistId} ep=${startEp} type=${startType} provider=${currentProvider}`);
   if (STREAM_URL_OVERRIDE) addLog('INFO', 'STREAM_URL_OVERRIDE active');
 
-  // Populate the Audio dropdown with content options immediately (before play)
   updateAudioTracks();
 
   loadMeta();
   loadEpisodesBackground();
   play();
+
+  // Re-scroll to top after all the async loading settles (some browsers
+  // adjust scroll as content loads in)
+  setTimeout(() => window.scrollTo(0, 0), 100);
 })();
 </script>
 </body>
