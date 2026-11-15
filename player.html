@@ -39,6 +39,15 @@
     </div>
 
     <aside class="side">
+      <!-- NEW: Content type (Sub/Dub) — top of sidebar -->
+      <div class="card">
+        <h3>Content</h3>
+        <div class="audio-toggle" id="audio-toggle">
+          <button data-type="sub" class="active">Subbed</button>
+          <button data-type="dub">Dubbed</button>
+        </div>
+      </div>
+
       <div class="card">
         <h3>Audio <span class="badge empty" id="audio-count">—</span></h3>
         <select id="audio-select" class="track-select" disabled>
@@ -191,9 +200,21 @@ header .brand {
   margin: 0 auto;
   padding: 20px;
 }
+
+/* ═══════ MOBILE: bigger episodes card ═══════ */
 @media (max-width: 900px) {
   .player-wrap { grid-template-columns: 1fr; padding: 12px; }
   .side { max-height: none; }
+
+  /* Bigger episodes on mobile — video is above, sidebar stacks below */
+  .episodes-card { max-height: min(720px, 78vh); }
+  .episodes-card.expanded { max-height: 96vh; }
+  .ep-list { min-height: 320px; }
+  .ep-list button {
+    min-height: 48px;
+    font-size: 15px;
+    padding: 14px 4px;
+  }
 }
 
 .video-box {
@@ -329,6 +350,34 @@ header .brand {
 .card h3 .badge.empty {
   background: rgba(255, 255, 255, 0.05);
   color: var(--muted);
+}
+
+/* ═══════ SUB / DUB TOGGLE ═══════ */
+.audio-toggle {
+  display: flex;
+  gap: 4px;
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: 10px;
+  padding: 4px;
+}
+.audio-toggle button {
+  flex: 1;
+  padding: 9px 12px;
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: all 0.15s;
+  letter-spacing: 0.02em;
+}
+.audio-toggle button:hover:not(.active) { color: var(--text); }
+.audio-toggle button.active {
+  background: linear-gradient(135deg, var(--accent, #7c5cff), var(--accent2, #a78bfa));
+  color: #fff;
+  box-shadow: 0 2px 8px var(--glow);
 }
 
 .track-select {
@@ -803,6 +852,33 @@ function setMetaBadge(id, text){
 }
 // ---------------- END STATUS ----------------
 
+// ---------------- SUB / DUB TOGGLE ----------------
+document.getElementById('audio-toggle').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-type]');
+  if (!b) return;
+  const newType = b.dataset.type;
+  if (newType === currentType) return;
+
+  currentType = newType;
+  [...document.getElementById('audio-toggle').children].forEach(x =>
+    x.classList.toggle('active', x === b));
+
+  // Clear any cached extract for the new type so we always fetch fresh
+  clearExtractCache(anilistId, currentEp, currentType);
+
+  // Re-render episodes (sub/dub availability may differ between providers)
+  renderEpisodes();
+
+  // Update URL so refresh preserves the choice
+  try {
+    history.replaceState(null, '', `?id=${anilistId}&ep=${currentEp}&type=${currentType}`);
+  } catch {}
+
+  addLog('WARN', `content → ${currentType} (re-extracting)`);
+  play(true, { deep: false });
+});
+// ---------------- END SUB / DUB ----------------
+
 // ---------------- AUDIO GRAPH / VOLUME / BRIGHTNESS ----------------
 function ensureAudioGraph(){
   if (audioCtx) return true;
@@ -1214,7 +1290,7 @@ function episodesFor(type){
 function renderEpisodes(){
   const list = episodesFor(currentType);
   if (!list.length){
-    epList.innerHTML = `<span class="hint">Loading episodes…</span>`;
+    epList.innerHTML = `<span class="hint">No ${currentType} episodes available from any provider.</span>`;
     return;
   }
   epList.innerHTML = list.map(e =>
@@ -1443,14 +1519,21 @@ function showProviderError(provider, reason){
       <div style="font-size:15px;font-weight:700">Stream failed · <span style="color:var(--accent2,#a78bfa)">${esc(provider)}</span></div>
       <div style="font-size:12px;opacity:.75;line-height:1.55">${esc(reason || 'Manifest did not load')}</div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin-top:6px">
-        <button id="overlay-reload" class="btn-ghost" style="padding:10px 18px;max-width:120px">Reload</button>
+        <button id="overlay-retry" class="btn-accent" style="padding:10px 20px;max-width:140px">Retry</button>
         <button id="overlay-next" class="btn-ghost" style="padding:10px 18px;max-width:130px">Next server</button>
         <button id="overlay-back" class="btn-ghost" style="padding:10px 18px;max-width:100px">Back</button>
       </div>
     </div>`;
 
-  const reloadBtn = document.getElementById('overlay-reload');
-  if (reloadBtn) reloadBtn.addEventListener('click', () => location.reload());
+  // Retry: re-extract with the same provider + same content type
+  const retryBtn = document.getElementById('overlay-retry');
+  if (retryBtn) retryBtn.addEventListener('click', () => {
+    clearExtractCache(anilistId, currentEp, currentType);
+    hideOverlay();
+    addLog('WARN', `retry extraction (${currentType})`);
+    play(true, { deep: false });
+  });
+
   const nextBtn = document.getElementById('overlay-next');
   if (nextBtn) nextBtn.addEventListener('click', () => {
     const idx = PROVIDER_LIST.indexOf(currentProvider);
@@ -1523,7 +1606,6 @@ function loadHls(src, subs, referer, provider, rawUrl){
       lowLatencyMode: false,
       debug: false,
 
-      // Fast startup: begin at lowest level so first fragment is tiny
       startLevel: 0,
       testBandwidth: false,
       startFragPrefetch: true,
@@ -1547,7 +1629,6 @@ function loadHls(src, subs, referer, provider, rawUrl){
       levelLoadingRetryDelay: 500,
       levelLoadingMaxRetryTimeout: 64000,
 
-      // ─── Fragment retries: generous for slow mobile networks ───
       fragLoadingTimeOut: 45000,
       fragLoadingMaxRetry: 15,
       fragLoadingRetryDelay: 800,
@@ -1617,7 +1698,6 @@ function loadHls(src, subs, referer, provider, rawUrl){
       addLog('ERROR', `HLS fatal: ${d.type} / ${d.details}`);
       clearStartupTimer();
 
-      // ═══ Sticky failed → fall back to fresh extract ═══
       if (provider === 'sticky'){
         addLog('WARN', 'sticky failed, extracting');
         clearSticky(anilistId, currentEp, currentType);
@@ -1627,7 +1707,6 @@ function loadHls(src, subs, referer, provider, rawUrl){
         return;
       }
 
-      // ═══ Manifest errors: auto-advance to next provider ═══
       if (/manifest/i.test(d.details || '')){
         if (hls){ try { hls.destroy(); } catch(_){} hls = null; }
         clearSticky(anilistId, currentEp, currentType);
@@ -1783,6 +1862,12 @@ $('#retry').addEventListener('click', () => {
 // ---------------- BOOT ----------------
 (async function boot(){
   if (!anilistId){ showOverlay('Missing ?id= in URL', true); return; }
+
+  // Set initial Sub/Dub toggle state from ?type= param
+  const toggleBtns = document.getElementById('audio-toggle').children;
+  [...toggleBtns].forEach(x =>
+    x.classList.toggle('active', x.dataset.type === currentType));
+
   addLog('INFO', `anilistId=${anilistId} ep=${startEp} type=${startType} provider=${currentProvider}`);
   if (STREAM_URL_OVERRIDE) addLog('INFO', 'STREAM_URL_OVERRIDE active');
   loadMeta();
