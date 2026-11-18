@@ -20,11 +20,30 @@
   <div class="player-wrap">
     <div class="player-main">
       <div class="video-box" id="video-box">
-        <!-- native controls removed -->
         <video id="video" playsinline webkit-playsinline preload="auto"></video>
         <div id="subtitle-overlay"></div>
 
-        <!-- ============ NEW: custom in-video controls ============ -->
+        <!-- ════════ NEW: CENTER CONTROLS ════════ -->
+        <div class="vjs-center-controls" id="vjs-center-controls">
+          <button class="vjs-center-btn vjs-center-side" id="vjs-rew-center" title="Rewind 10s" aria-label="Rewind 10 seconds">
+            <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>
+            </svg>
+            <span class="vjs-skip-label-big">10</span>
+          </button>
+          <button class="vjs-center-btn vjs-center-play" id="vjs-play-center" title="Play" aria-label="Play">
+            <svg id="vjs-play-center-icon" width="54" height="54" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>
+          </button>
+          <button class="vjs-center-btn vjs-center-side" id="vjs-fwd-center" title="Forward 10s" aria-label="Forward 10 seconds">
+            <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+            </svg>
+            <span class="vjs-skip-label-big">10</span>
+          </button>
+        </div>
+        <div class="vjs-toast" id="vjs-toast"></div>
+
+        <!-- ════════ BOTTOM CONTROLS ════════ -->
         <div class="vjs-controls" id="vjs-controls">
           <div class="vjs-progress-wrap" id="vjs-progress-wrap">
             <div class="vjs-progress-buffered" id="vjs-progress-buffered"></div>
@@ -102,7 +121,6 @@
             </div>
           </div>
         </div>
-        <!-- ============ /NEW ============ -->
 
         <div class="overlay" id="overlay">Loading…</div>
       </div>
@@ -198,8 +216,7 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 header {
-  display: flex; align-items: center; gap: 12px;
-  padding: 14px 20px;
+  display: flex; align-items: center; gap: 12px; padding: 14px 20px;
   border-bottom: 1px solid var(--glass-border);
   background: rgba(8,8,12,0.72);
   backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
@@ -207,11 +224,9 @@ header {
 }
 header .back {
   display: inline-flex; align-items: center; gap: 4px;
-  color: var(--text); text-decoration: none;
-  font-size: 13px; font-weight: 600;
+  color: var(--text); text-decoration: none; font-size: 13px; font-weight: 600;
   padding: 7px 12px; border-radius: 8px;
-  background: rgba(255,255,255,0.04);
-  border: 1px solid var(--glass-border);
+  background: rgba(255,255,255,0.04); border: 1px solid var(--glass-border);
   transition: all .18s;
 }
 header .back:hover { border-color: var(--accent, #7c5cff); }
@@ -221,7 +236,6 @@ header .brand {
   -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-
 .player-wrap { display: grid; grid-template-columns: minmax(0,1fr) 340px; gap: 20px; max-width: 1600px; margin: 0 auto; padding: 20px; }
 
 /* ═══════ VIDEO BOX ═══════ */
@@ -241,15 +255,96 @@ header .brand {
   white-space: pre-wrap; text-shadow: 0 1px 2px rgba(0,0,0,0.8); display: none;
 }
 
-/* ═══════ CUSTOM IN-VIDEO CONTROLS ═══════ */
+/* ═══════ CENTER CONTROLS ═══════ */
+.vjs-center-controls {
+  position: absolute; top: 50%; left: 50%;
+  transform: translate(-50%, -50%) scale(0.82);
+  display: flex; align-items: center; gap: 26px;
+  z-index: 4; opacity: 0; pointer-events: none;
+  transition: opacity 0.32s cubic-bezier(0.4, 0, 0.2, 1),
+              transform 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
+  will-change: opacity, transform;
+}
+.vjs-center-controls.visible {
+  opacity: 1;
+  transform: translate(-50%, -50%) scale(1);
+  transition-delay: 0.06s;
+}
+.vjs-center-btn {
+  pointer-events: auto; border: none; cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: rgba(0,0,0,0.55);
+  -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+  color: #fff; border-radius: 50%;
+  position: relative;
+  transition: background 0.22s, transform 0.22s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.25s;
+  -webkit-tap-highlight-color: transparent;
+}
+.vjs-center-btn svg { filter: drop-shadow(0 1px 2px rgba(0,0,0,0.4)); }
+.vjs-center-side { width: 62px; height: 62px; }
+.vjs-center-play {
+  width: 88px; height: 88px;
+  background: linear-gradient(135deg, rgba(124,92,255,0.85), rgba(167,139,250,0.85));
+  box-shadow: 0 6px 24px rgba(0,0,0,0.5), 0 0 0 0 rgba(124,92,255,0.5);
+}
+.vjs-center-btn:hover {
+  background: linear-gradient(135deg, rgba(124,92,255,0.95), rgba(167,139,250,0.95));
+  transform: scale(1.08);
+  box-shadow: 0 6px 28px rgba(0,0,0,0.55), 0 0 28px rgba(124,92,255,0.55);
+}
+.vjs-center-btn:active { transform: scale(0.93); }
+.vjs-center-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.vjs-skip-label-big {
+  position: absolute; font-size: 10px; font-weight: 800;
+  bottom: 13px; pointer-events: none; letter-spacing: 0.02em;
+}
+.vjs-center-controls.visible.is-paused .vjs-center-play {
+  animation: centerPulse 2.6s ease-in-out infinite;
+}
+@keyframes centerPulse {
+  0%, 100% { box-shadow: 0 6px 24px rgba(0,0,0,0.5), 0 0 0 0 rgba(124,92,255,0.55); }
+  50%      { box-shadow: 0 6px 24px rgba(0,0,0,0.5), 0 0 0 18px rgba(124,92,255,0); }
+}
+
+/* ═══════ TOAST (episode change) ═══════ */
+.vjs-toast {
+  position: absolute; top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  padding: 14px 30px;
+  background: rgba(0,0,0,0.82);
+  -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+  border: 1px solid rgba(124,92,255,0.35);
+  border-radius: 12px;
+  color: #fff; font-size: 16px; font-weight: 700;
+  letter-spacing: 0.02em; white-space: nowrap;
+  z-index: 11; opacity: 0; pointer-events: none;
+}
+.vjs-toast.show { animation: toastShow 1.7s cubic-bezier(0.34, 1.56, 0.64, 1); }
+@keyframes toastShow {
+  0%   { opacity: 0; transform: translate(-50%, calc(-50% + 18px)) scale(0.88); }
+  18%  { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  78%  { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  100% { opacity: 0; transform: translate(-50%, calc(-50% - 14px)) scale(0.96); }
+}
+
+/* ═══════ BOTTOM CONTROLS ═══════ */
 .vjs-controls {
   position: absolute; left: 0; right: 0; bottom: 0;
   padding: 44px 14px 10px;
   background: linear-gradient(to top, rgba(0,0,0,0.88) 0%, rgba(0,0,0,0.42) 55%, rgba(0,0,0,0) 100%);
-  z-index: 5; opacity: 0; transition: opacity 0.25s;
+  z-index: 5;
+  opacity: 0;
+  transform: translateY(14px);
+  transition: opacity 0.32s cubic-bezier(0.4, 0, 0.2, 1),
+              transform 0.42s cubic-bezier(0.22, 0.61, 0.36, 1);
   pointer-events: none; user-select: none;
+  will-change: opacity, transform;
 }
-.vjs-controls.visible { opacity: 1; pointer-events: auto; }
+.vjs-controls.visible {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
 
 .vjs-progress-wrap {
   position: relative; height: 16px; display: flex; align-items: center;
@@ -257,25 +352,29 @@ header .brand {
 }
 .vjs-progress-wrap::before {
   content: ''; position: absolute; left: 0; right: 0; height: 4px;
-  background: rgba(255,255,255,0.18); border-radius: 2px; transition: height .15s;
+  background: rgba(255,255,255,0.18); border-radius: 2px;
+  transition: height .18s cubic-bezier(0.4, 0, 0.2, 1);
 }
 .vjs-progress-wrap:hover::before,
 .vjs-progress-wrap.dragging::before { height: 6px; }
 .vjs-progress-buffered, .vjs-progress-played {
   position: absolute; left: 0; height: 4px; border-radius: 2px;
-  pointer-events: none; transition: height .15s;
+  pointer-events: none;
+  transition: height .18s cubic-bezier(0.4, 0, 0.2, 1);
 }
+.vjs-progress-buffered { background: rgba(255,255,255,0.32); width: 0%; transition: width 0.35s linear, height .18s; }
+.vjs-progress-played { background: linear-gradient(90deg, #7c5cff, #a78bfa); width: 0%; transition: width 0.18s linear, height .18s; }
 .vjs-progress-wrap:hover .vjs-progress-buffered,
 .vjs-progress-wrap:hover .vjs-progress-played,
 .vjs-progress-wrap.dragging .vjs-progress-buffered,
 .vjs-progress-wrap.dragging .vjs-progress-played { height: 6px; }
-.vjs-progress-buffered { background: rgba(255,255,255,0.32); width: 0%; }
-.vjs-progress-played { background: linear-gradient(90deg, #7c5cff, #a78bfa); width: 0%; }
+.vjs-progress-wrap.dragging .vjs-progress-played { transition: height .18s; }
+
 .vjs-progress-thumb {
   position: absolute; width: 14px; height: 14px; border-radius: 50%; background: #fff;
   box-shadow: 0 0 0 3px rgba(124,92,255,0.4);
   transform: translateX(-50%); pointer-events: none; left: 0%;
-  opacity: 0; transition: opacity .15s;
+  opacity: 0; transition: opacity .18s;
 }
 .vjs-progress-wrap:hover .vjs-progress-thumb,
 .vjs-progress-wrap.dragging .vjs-progress-thumb { opacity: 1; }
@@ -288,14 +387,18 @@ header .brand {
   width: 36px; height: 36px; border-radius: 8px;
   display: inline-flex; align-items: center; justify-content: center;
   cursor: pointer; font-size: 12px; font-weight: 700; padding: 0;
-  transition: background .15s, transform .1s;
+  transition: background .18s, transform .18s cubic-bezier(0.34, 1.56, 0.64, 1), color .18s, box-shadow .18s;
   position: relative; flex-shrink: 0;
+  -webkit-tap-highlight-color: transparent;
 }
-.vjs-btn:hover { background: rgba(255,255,255,0.12); }
-.vjs-btn:active { transform: scale(0.94); }
+.vjs-btn:hover { background: rgba(255,255,255,0.12); transform: scale(1.08); }
+.vjs-btn:active { transform: scale(0.92); }
 .vjs-btn:disabled { opacity: 0.35; cursor: not-allowed; }
-.vjs-btn:disabled:hover { background: none; }
-.vjs-btn.active { color: #a78bfa; text-shadow: 0 0 8px rgba(167,139,250,0.5); }
+.vjs-btn:disabled:hover { background: none; transform: none; }
+.vjs-btn.active {
+  color: #a78bfa;
+  text-shadow: 0 0 8px rgba(167,139,250,0.5);
+}
 .vjs-play { width: 42px; height: 42px; }
 .vjs-skip-label {
   position: absolute; font-size: 8px; font-weight: 800; bottom: 8px; pointer-events: none;
@@ -305,7 +408,6 @@ header .brand {
   margin: 0 6px; font-variant-numeric: tabular-nums; white-space: nowrap;
 }
 
-/* audio + cc button labels sized */
 #vjs-audio-btn { width: auto; padding: 0 10px; font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; }
 #vjs-cc-btn { font-size: 11px; letter-spacing: 0.03em; }
 
@@ -313,12 +415,18 @@ header .brand {
 .vjs-pop-wrap { position: relative; }
 .vjs-pop {
   position: absolute; bottom: calc(100% + 8px); right: 0;
-  background: rgba(20,20,28,0.97); backdrop-filter: blur(16px);
+  background: rgba(20,20,28,0.97);
+  -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px);
   border: 1px solid rgba(255,255,255,0.08); border-radius: 10px;
   padding: 12px; min-width: 200px; display: none; z-index: 10;
-  box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+  box-shadow: 0 8px 28px rgba(0,0,0,0.5), 0 0 0 1px rgba(124,92,255,0.05);
+  transform-origin: bottom right;
 }
-.vjs-pop.open { display: block; }
+.vjs-pop.open { display: block; animation: popupIn 0.22s cubic-bezier(0.34, 1.56, 0.64, 1); }
+@keyframes popupIn {
+  0%   { opacity: 0; transform: translateY(10px) scale(0.94); }
+  100% { opacity: 1; transform: translateY(0) scale(1); }
+}
 .vjs-pop-title {
   font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em;
   color: rgba(255,255,255,0.6); margin-bottom: 8px;
@@ -348,7 +456,7 @@ header .brand {
   border-radius: 8px; color: #e0e0e8; font-size: 11px; font-weight: 600;
   cursor: pointer; transition: all .15s;
 }
-.vjs-menu-btn:hover { border-color: rgba(124,92,255,0.4); color: #a78bfa; }
+.vjs-menu-btn:hover { border-color: rgba(124,92,255,0.4); color: #a78bfa; transform: translateY(-1px); }
 .vjs-menu-check {
   display: flex; align-items: center; gap: 8px; margin-top: 10px;
   font-size: 12px; font-weight: 600; color: #e0e0e8; cursor: pointer;
@@ -489,6 +597,13 @@ header .brand {
   .vjs-bar-left, .vjs-bar-right { gap: 0; }
   .vjs-pop { min-width: 170px; padding: 10px; }
   #vjs-audio-btn { padding: 0 7px; font-size: 9px; }
+  .vjs-center-controls { gap: 18px; }
+  .vjs-center-side { width: 50px; height: 50px; }
+  .vjs-center-side svg { width: 24px; height: 24px; }
+  .vjs-center-play { width: 70px; height: 70px; }
+  .vjs-center-play svg { width: 44px; height: 44px; }
+  .vjs-skip-label-big { font-size: 9px; bottom: 10px; }
+  .vjs-toast { font-size: 14px; padding: 11px 22px; }
 }
 </style>
 
@@ -811,6 +926,7 @@ function setVolume(v){
   if (vVal) vVal.textContent = v + '%';
   applyVolume(v);
   updateVolumeIcon();
+  popVolumeIcon();
   try { localStorage.setItem('player-volume', String(v)); } catch {}
 }
 function setBrightness(b){
@@ -1466,6 +1582,7 @@ epList.addEventListener('click', ev => {
   const n = Number(b.dataset.ep);
   if (n === currentEp) return;
   currentEp = n;
+  showToast(`Episode ${currentEp}`);
   const card = document.getElementById('episodes-card');
   if (card && !card.classList.contains('expanded')) setEpisodesExpanded(true);
   else setTimeout(() => scrollActiveIntoEpList(true), 50);
@@ -1474,9 +1591,9 @@ epList.addEventListener('click', ev => {
 });
 $('#retry').addEventListener('click', () => { clearExtractCache(anilistId, currentEp, currentType); addLog('WARN', 'manual retry'); scrollToVideo(); play(true, { deep: false }); });
 
-/* ============================================================
-   CUSTOM IN-VIDEO CONTROLS (NEW)
-   ============================================================ */
+/* ══════════════════════════════════════════════════════════════
+   CUSTOM IN-VIDEO CONTROLS
+   ══════════════════════════════════════════════════════════════ */
 function syncMirrorSelects(){
   const map = [
     ['audio-select', 'vjs-audio-select'],
@@ -1506,6 +1623,15 @@ function updateVolumeIcon(){
   }
 }
 
+function popVolumeIcon(){
+  const icon = document.getElementById('vjs-vol-icon');
+  if (!icon) return;
+  icon.style.transition = 'transform 0.15s ease';
+  icon.style.transform = 'scale(1.25)';
+  clearTimeout(icon._popTimer);
+  icon._popTimer = setTimeout(() => { icon.style.transform = 'scale(1)'; }, 160);
+}
+
 function updateNavButtons(){
   const prev = document.getElementById('vjs-prev');
   const next = document.getElementById('vjs-next');
@@ -1515,6 +1641,15 @@ function updateNavButtons(){
   const idx = list.findIndex(e => e.number === currentEp);
   prev.disabled = idx <= 0;
   next.disabled = idx === -1 || idx >= list.length - 1;
+}
+
+function showToast(text){
+  const toast = document.getElementById('vjs-toast');
+  if (!toast) return;
+  toast.textContent = text;
+  toast.classList.remove('show');
+  void toast.offsetWidth;
+  toast.classList.add('show');
 }
 
 function goToEpisode(delta){
@@ -1527,6 +1662,7 @@ function goToEpisode(delta){
   if (list[target].number === currentEp) return;
   currentEp = list[target].number;
   addLog('INFO', `episode → ${currentEp}`);
+  showToast(`Episode ${currentEp}`);
   renderEpisodes();
   scrollToVideo();
   play();
@@ -1535,26 +1671,41 @@ function goToEpisode(delta){
 function setPlayIcon(){
   const icon = document.getElementById('vjs-play-icon');
   const btn = document.getElementById('vjs-play');
-  if (!icon || !btn) return;
-  if (video.paused){
-    icon.innerHTML = '<polygon points="5,3 19,12 5,21"/>';
-    btn.title = 'Play';
-    btn.setAttribute('aria-label', 'Play');
-  } else {
-    icon.innerHTML = '<rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/>';
-    btn.title = 'Pause';
-    btn.setAttribute('aria-label', 'Pause');
+  const centerIcon = document.getElementById('vjs-play-center-icon');
+  const centerBtn = document.getElementById('vjs-play-center');
+  const cc = document.getElementById('vjs-center-controls');
+  const isPaused = video.paused;
+  const glyph = isPaused ? '<polygon points="5,3 19,12 5,21"/>' : '<rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/>';
+  if (icon) icon.innerHTML = glyph;
+  if (centerIcon) centerIcon.innerHTML = glyph;
+  const label = isPaused ? 'Play' : 'Pause';
+  if (btn){ btn.title = label; btn.setAttribute('aria-label', label); }
+  if (centerBtn){ centerBtn.title = label; centerBtn.setAttribute('aria-label', label); }
+  if (cc){
+    if (isPaused) cc.classList.add('is-paused');
+    else cc.classList.remove('is-paused');
   }
 }
 
 let hideTimer = null;
+
 function showControls(){
   const controls = document.getElementById('vjs-controls');
+  const center = document.getElementById('vjs-center-controls');
   if (!controls) return;
   controls.classList.add('visible');
+  if (center) center.classList.add('visible');
   if (hideTimer){ clearTimeout(hideTimer); hideTimer = null; }
   if (!video.paused && !document.querySelector('.vjs-pop.open')){
-    hideTimer = setTimeout(() => { controls.classList.remove('visible'); hideTimer = null; }, 3000);
+    hideTimer = setTimeout(function schedule(){
+      if (controls.matches(':hover') || (center && center.matches(':hover')) || document.querySelector('.vjs-pop.open')){
+        hideTimer = setTimeout(schedule, 1000);
+        return;
+      }
+      controls.classList.remove('visible');
+      if (center) center.classList.remove('visible');
+      hideTimer = null;
+    }, 3000);
   }
 }
 
@@ -1570,10 +1721,11 @@ function fmtTime(s){
 
 function initCustomControls(){
   const controls = document.getElementById('vjs-controls');
+  const center = document.getElementById('vjs-center-controls');
   const box = document.getElementById('video-box');
   if (!controls || !box) return;
 
-  // ---- Progress bar ----
+  /* ───── Progress bar ───── */
   const wrap = document.getElementById('vjs-progress-wrap');
   const played = document.getElementById('vjs-progress-played');
   const buffered = document.getElementById('vjs-progress-buffered');
@@ -1621,7 +1773,7 @@ function initCustomControls(){
     buffered.style.width = ((end / video.duration) * 100) + '%';
   });
 
-  // ---- Play / Pause ----
+  /* ───── Play / Pause ───── */
   document.getElementById('vjs-play').addEventListener('click', () => {
     if (!video.src && !video.currentSrc) return;
     if (video.paused) video.play().catch(()=>{});
@@ -1630,7 +1782,7 @@ function initCustomControls(){
   video.addEventListener('play', () => { setPlayIcon(); showControls(); });
   video.addEventListener('pause', () => { setPlayIcon(); showControls(); });
 
-  // ---- Skip 10s ----
+  /* ───── Skip 10s ───── */
   document.getElementById('vjs-rew').addEventListener('click', () => {
     if (!isFinite(video.duration)) return;
     video.currentTime = Math.max(0, video.currentTime - 10);
@@ -1640,11 +1792,32 @@ function initCustomControls(){
     video.currentTime = Math.min(video.duration, video.currentTime + 10);
   });
 
-  // ---- Prev / Next episode ----
+  /* ───── Center controls ───── */
+  document.getElementById('vjs-play-center').addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (!video.src && !video.currentSrc) return;
+    if (video.paused) video.play().catch(()=>{});
+    else video.pause();
+    showControls();
+  });
+  document.getElementById('vjs-rew-center').addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (!isFinite(video.duration)) return;
+    video.currentTime = Math.max(0, video.currentTime - 10);
+    showControls();
+  });
+  document.getElementById('vjs-fwd-center').addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (!isFinite(video.duration)) return;
+    video.currentTime = Math.min(video.duration, video.currentTime + 10);
+    showControls();
+  });
+
+  /* ───── Prev / Next episode ───── */
   document.getElementById('vjs-prev').addEventListener('click', () => goToEpisode(-1));
   document.getElementById('vjs-next').addEventListener('click', () => goToEpisode(1));
 
-  // ---- Autoplay next ----
+  /* ───── Autoplay next ───── */
   const autoChk = document.getElementById('vjs-autoplay');
   if (autoChk){
     autoChk.checked = autoplayNext;
@@ -1664,19 +1837,19 @@ function initCustomControls(){
     goToEpisode(1);
   });
 
-  // ---- Volume popup ----
+  /* ───── Volume popup ───── */
   const volRange = document.getElementById('vjs-vol-range');
   volRange.value = volumeSlider.value;
   document.getElementById('vjs-vol-val').textContent = volumeSlider.value + '%';
   volRange.addEventListener('input', (e) => setVolume(parseInt(e.target.value, 10)));
 
-  // ---- Brightness popup ----
+  /* ───── Brightness popup ───── */
   const brightRange = document.getElementById('vjs-bright-range');
   brightRange.value = brightnessSlider.value;
   document.getElementById('vjs-bright-val').textContent = brightnessSlider.value + '%';
   brightRange.addEventListener('input', (e) => setBrightness(parseInt(e.target.value, 10)));
 
-  // ---- CC select / style shortcut ----
+  /* ───── CC select / style shortcut ───── */
   document.getElementById('vjs-cc-select').addEventListener('change', (e) => {
     const main = document.getElementById('caption-select');
     if (!main) return;
@@ -1684,7 +1857,6 @@ function initCustomControls(){
     main.dispatchEvent(new Event('change'));
   });
   document.getElementById('vjs-cc-style').addEventListener('click', () => {
-    // close popups, open the sidebar caption settings
     document.querySelectorAll('.vjs-pop.open').forEach(p => p.classList.remove('open'));
     const toggle = document.getElementById('cc-settings-toggle');
     const panel = document.getElementById('caption-settings');
@@ -1693,7 +1865,7 @@ function initCustomControls(){
     if (card) card.scrollIntoView({ behavior: 'smooth', block: 'center' });
   });
 
-  // ---- Audio select ----
+  /* ───── Audio select ───── */
   document.getElementById('vjs-audio-select').addEventListener('change', (e) => {
     const main = document.getElementById('audio-select');
     if (!main) return;
@@ -1701,7 +1873,7 @@ function initCustomControls(){
     main.dispatchEvent(new Event('change'));
   });
 
-  // ---- Quality select ----
+  /* ───── Quality select ───── */
   document.getElementById('vjs-quality-select').addEventListener('change', (e) => {
     const main = document.getElementById('quality-select');
     if (!main) return;
@@ -1709,7 +1881,7 @@ function initCustomControls(){
     main.dispatchEvent(new Event('change'));
   });
 
-  // ---- Fullscreen ----
+  /* ───── Fullscreen ───── */
   document.getElementById('vjs-fs-btn').addEventListener('click', () => {
     if (document.fullscreenElement || document.webkitFullscreenElement){
       (document.exitFullscreen || document.webkitExitFullscreen).call(document);
@@ -1722,10 +1894,10 @@ function initCustomControls(){
     }
   });
 
-  // ---- Popup open/close ----
-  document.querySelectorAll('.vjs-pop-wrap').forEach(wrap => {
-    const btn = wrap.querySelector('.vjs-btn');
-    const pop = wrap.querySelector('.vjs-pop');
+  /* ───── Popup open/close ───── */
+  document.querySelectorAll('.vjs-pop-wrap').forEach(wrapEl => {
+    const btn = wrapEl.querySelector('.vjs-btn');
+    const pop = wrapEl.querySelector('.vjs-pop');
     if (!btn || !pop) return;
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -1742,7 +1914,7 @@ function initCustomControls(){
     if (hadOpen) showControls();
   });
 
-  // ---- Auto show/hide ----
+  /* ───── Auto show/hide ───── */
   box.addEventListener('mousemove', showControls);
   box.addEventListener('touchstart', showControls, { passive: true });
   video.addEventListener('click', () => {
@@ -1752,11 +1924,10 @@ function initCustomControls(){
     showControls();
   });
 
-  // ---- Initial state ----
+  /* ───── Initial state ───── */
   setPlayIcon();
   updateVolumeIcon();
   updateNavButtons();
-  // Mirror initial state
   document.getElementById('vjs-vol-range').value = volumeSlider.value;
   document.getElementById('vjs-vol-val').textContent = volumeSlider.value + '%';
   document.getElementById('vjs-bright-range').value = brightnessSlider.value;
@@ -1764,16 +1935,16 @@ function initCustomControls(){
   syncMirrorSelects();
 }
 
-/* ============================================================
+/* ══════════════════════════════════════════════════════════════
    BOOT
-   ============================================================ */
+   ══════════════════════════════════════════════════════════════ */
 (async function boot(){
   if (!anilistId){ showOverlay('Missing ?id= in URL', true); return; }
   window.scrollTo(0, 0);
   addLog('INFO', `anilistId=${anilistId} ep=${startEp} type=${startType} provider=${currentProvider}`);
   if (STREAM_URL_OVERRIDE) addLog('INFO', 'STREAM_URL_OVERRIDE active');
 
-  initCustomControls();   // NEW
+  initCustomControls();
 
   updateAudioTracks();
   loadMeta();
