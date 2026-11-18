@@ -65,6 +65,24 @@ header .brand {
 }
 .video-box video { display: block; width: 100%; height: 100%; background: #000; object-fit: contain; transition: filter .15s ease; }
 
+/* Force video to fill landscape fullscreen */
+.video-box:fullscreen,
+.video-box:-webkit-full-screen,
+.video-box:-moz-full-screen {
+  width: 100vw !important;
+  height: 100vh !important;
+  aspect-ratio: auto !important;
+  border-radius: 0 !important;
+  border: 0 !important;
+  background: #000 !important;
+}
+.video-box:fullscreen video,
+.video-box:-webkit-full-screen video {
+  width: 100% !important;
+  height: 100% !important;
+  object-fit: contain !important;
+}
+
 #subtitle-overlay {
   position: absolute; left: 50%; transform: translateX(-50%);
   bottom: 10%; max-width: 90%; padding: 6px 14px; border-radius: 6px;
@@ -113,17 +131,28 @@ header .brand {
 }
 .vjs-center-btn:active { transform: scale(0.93); }
 .vjs-center-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-.vjs-skip-label-big {
+
+/* ── "10" label centered inside skip buttons ── */
+.vjs-skip-label-big,
+.vjs-skip-label {
   position: absolute;
   left: 50%;
-  transform: translateX(-50%);
-  bottom: 13px;
-  font-size: 10px;
-  font-weight: 800;
+  top: 50%;
+  transform: translate(-50%, -50%);
   pointer-events: none;
-  letter-spacing: 0.02em;
   line-height: 1;
+  font-weight: 800;
 }
+.vjs-skip-label-big {
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  margin-top: 2px;
+}
+.vjs-skip-label {
+  font-size: 8px;
+  margin-top: 1px;
+}
+
 .vjs-center-controls.visible.is-paused .vjs-center-play {
   animation: centerPulse 2.6s ease-in-out infinite;
 }
@@ -274,16 +303,6 @@ header .brand {
   text-shadow: 0 0 8px rgba(167,139,250,0.5);
 }
 .vjs-play { width: 42px; height: 42px; }
-.vjs-skip-label {
-  position: absolute;
-  left: 50%;
-  transform: translateX(-50%);
-  bottom: 8px;
-  font-size: 8px;
-  font-weight: 800;
-  pointer-events: none;
-  line-height: 1;
-}
 .vjs-time {
   font-size: 12px; font-weight: 600; color: rgba(255,255,255,0.85);
   margin: 0 6px; font-variant-numeric: tabular-nums; white-space: nowrap;
@@ -483,7 +502,7 @@ header .brand {
   .vjs-center-side svg { width: 24px; height: 24px; }
   .vjs-center-play { width: 70px; height: 70px; }
   .vjs-center-play svg { width: 44px; height: 44px; }
-  .vjs-skip-label-big { font-size: 9px; bottom: 10px; }
+  .vjs-skip-label-big { font-size: 9px; margin-top: 2px; }
 
   /* HIDE bottom prev/next and fwd/rew on mobile */
   #vjs-prev, #vjs-next, #vjs-rew, #vjs-fwd { display: none !important; }
@@ -747,6 +766,23 @@ function scrollActiveIntoEpList(smooth = false){
   }
 }
 /* ---------------- END SCROLL HELPERS ---------------- */
+
+/* ---------------- ORIENTATION HELPERS ---------------- */
+async function lockLandscape() {
+  try {
+    if (screen.orientation && screen.orientation.lock) {
+      await screen.orientation.lock('landscape').catch(() => {});
+    }
+  } catch {}
+}
+function unlockOrientation() {
+  try {
+    if (screen.orientation && screen.orientation.unlock) {
+      screen.orientation.unlock();
+    }
+  } catch {}
+}
+/* ---------------- END ORIENTATION HELPERS ---------------- */
 
 /* ---------------- PROVIDERS ---------------- */
 const ALL_PROVIDERS = ['kaa','anizone','aniwaves','anineko','animeonsen','anikoto','mkissa','animegg','anibd'];
@@ -1982,15 +2018,53 @@ video.addEventListener('loadedmetadata', updateProgress);
   });
 })();
 
-/* ---------- Fullscreen ---------- */
-document.getElementById('vjs-fs-btn').addEventListener('click', () => {
-  const box = document.getElementById('video-box');
-  if (!document.fullscreenElement){
-    (box.requestFullscreen || box.webkitRequestFullscreen || box.msRequestFullscreen)?.call(box);
+/* ---------- Fullscreen (with forced landscape on mobile) ---------- */
+const fsBtn = document.getElementById('vjs-fs-btn');
+const videoBoxFs = document.getElementById('video-box');
+
+async function enterFullscreen() {
+  const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+  const req = videoBoxFs.requestFullscreen
+           || videoBoxFs.webkitRequestFullscreen
+           || videoBoxFs.webkitEnterFullscreen
+           || videoBoxFs.msRequestFullscreen;
+  try {
+    if (req) await req.call(videoBoxFs);
+  } catch (e) {
+    addLog('WARN', `fullscreen failed: ${e.message}`);
+  }
+  if (isMobile) {
+    await lockLandscape();
+  }
+}
+
+function exitFullscreen() {
+  const exit = document.exitFullscreen
+            || document.webkitExitFullscreen
+            || document.msExitFullscreen;
+  try { exit?.call(document); } catch {}
+  unlockOrientation();
+}
+
+fsBtn.addEventListener('click', () => {
+  if (!document.fullscreenElement) enterFullscreen();
+  else exitFullscreen();
+});
+
+document.addEventListener('fullscreenchange', () => {
+  if (document.fullscreenElement) {
+    const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+    if (isMobile) lockLandscape();
   } else {
-    (document.exitFullscreen || document.webkitExitFullscreen || document.msExitFullscreen)?.call(document);
+    unlockOrientation();
   }
 });
+document.addEventListener('webkitfullscreenchange', () => {
+  if (!document.fullscreenElement) unlockOrientation();
+});
+
+video.addEventListener('webkitbeginfullscreen', () => lockLandscape());
+video.addEventListener('webkitendfullscreen', () => unlockOrientation());
 
 /* ---------- Auto-hide controls ---------- */
 const centerControlsEl = document.getElementById('vjs-center-controls');
